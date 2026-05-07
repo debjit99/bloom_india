@@ -247,64 +247,216 @@ with tab1:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab2:
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.markdown('<div class="section-head">INCOME STATEMENT  —  ₹ Crores</div>', unsafe_allow_html=True)
-        items = [
+    # ── Field groups — show everything available ──────────────────────────────
+    GROUPS = {
+        "P&L": [
             ("Revenue / Interest Earned", "revenue"),
+            ("Interest on Advances",      "interest_on_advances"),
+            ("Income on Investments",     "income_on_investments"),
+            ("Interest on RBI Funds",     "interest_on_rbi"),
+            ("Other Interest",            "other_interest"),
+            ("Other Revenue from Ops",    "other_rev_from_ops"),
             ("Other Income",              "other_income"),
             ("Total Income",              "total_income"),
-            ("Interest Expended",         "interest_expended"),
+            ("Cost of Materials",         "cost_of_materials"),
+            ("Purchases of Stock",        "purchases_stock"),
+            ("Inventory Change",          "inventory_change"),
             ("Employee Cost",             "employee_cost"),
-            ("Depreciation",              "depreciation"),
-            ("Operating Profit",          "operating_profit"),
-            ("Provisions",                "provisions"),
-            ("Tax Expense",               "tax"),
-            ("Net Profit (PAT)",          "pat"),
-        ]
+            ("Finance Costs / Int. Exp.", "finance_costs"),
+            ("Depreciation & Amort.",     "depreciation"),
+            ("Other Expenses",            "other_expenses"),
+            ("Total Expenses",            "total_expenses"),
+            ("Op. Expenses (Bank)",       "operating_expenses_bank"),
+            ("Expenditure excl. Prov.",   "expenditure_excl_prov"),
+            ("EBITDA / Op. Profit",       "ebitda"),
+            ("Operating Profit (Bank)",   "operating_profit_bank"),
+            ("Provisions (Bank)",         "provisions_bank"),
+            ("Exceptional Items",         "exceptional_items"),
+            ("Profit Before Tax",         "profit_before_tax"),
+            ("Current Tax",               "current_tax"),
+            ("Deferred Tax",              "deferred_tax"),
+            ("Total Tax",                 "tax"),
+            ("PAT (Continuing Ops)",      "pat_continuing"),
+            ("PAT (Discontinued Ops)",    "pat_discontinued"),
+            ("PAT",                       "pat"),
+            ("Other Comprehensive Inc.",  "other_comprehensive_income"),
+            ("Total Comprehensive Inc.",  "total_comprehensive_income"),
+            ("PAT Attributable Owners",   "pat_owners"),
+            ("PAT Minority Interest",     "pat_minority"),
+            ("Share of Associates",       "share_of_associates"),
+            ("Dividend Income",           "dividend_income"),
+            ("Fees & Commission",         "fees_commission"),
+            ("Net Gain Fair Value",       "net_gain_fair_value"),
+            ("Impairment Fin. Inst.",     "impairment_fin_inst"),
+            ("Net Interest Income",       "nii"),
+        ],
+        "EPS & Ratios": [
+            ("EPS Basic",                "eps_basic"),
+            ("EPS Diluted",              "eps_diluted"),
+            ("EPS Basic (Continuing)",   "eps_basic_continuing"),
+            ("EPS Basic (Discontinued)", "eps_basic_discontinued"),
+            ("PAT Margin %",             "pat_margin"),
+            ("Revenue YoY %",            "revenue_yoy"),
+            ("PAT YoY %",               "pat_yoy"),
+            ("EPS YoY %",               "eps_basic_yoy"),
+            ("Revenue Acceleration",     "revenue_accel"),
+            ("Margin Change QoQ pp",     "margin_change_qoq"),
+            ("Margin Change YoY pp",     "margin_change_yoy"),
+            ("SUE",                      "sue"),
+            ("Debt / Equity Ratio",      "debt_equity_ratio"),
+            ("Debt Service Cover",       "debt_service_ratio"),
+            ("Interest Coverage",        "interest_coverage"),
+            ("Return on Assets",         "roa"),
+        ],
+        "Balance Sheet — Assets": [
+            ("Total Assets",             "total_assets"),
+            ("Non-current Assets",       "noncurrent_assets"),
+            ("Current Assets",           "current_assets"),
+            ("PPE",                      "ppe"),
+            ("Capital WIP",              "capwip"),
+            ("Goodwill",                 "goodwill"),
+            ("Intangibles",              "intangibles"),
+            ("Intangibles WIP",          "intangibles_wip"),
+            ("Non-current Investments",  "noncurrent_investments"),
+            ("Current Investments",      "current_investments"),
+            ("Inventories",              "inventories"),
+            ("Trade Receivables",        "trade_receivables"),
+            ("Cash & Equivalents",       "cash_equivalents"),
+            ("Bank Balances",            "bank_balances"),
+            ("Loans & Advances",         "loans_assets"),
+            ("Other Financial Assets",   "other_financial_assets"),
+            ("Other Current Assets",     "other_current_assets"),
+            ("Other Non-current Assets", "other_noncurrent_assets"),
+            ("Deferred Tax Assets",      "deferred_tax_assets"),
+            ("Investment Property",      "investment_property"),
+            ("Investments in Assoc.",    "investments_associates"),
+            ("Financial Assets (Bank)",  "financial_assets_bank"),
+        ],
+        "Balance Sheet — Liabilities & Equity": [
+            ("Equity Capital",           "equity_capital"),
+            ("Reserves & Surplus",       "reserves_surplus"),
+            ("Total Equity",             "equity_total"),
+            ("Equity (Owners)",          "equity_owners"),
+            ("Minority Interest",        "minority_interest"),
+            ("Total Liabilities",        "total_liabilities"),
+            ("Non-current Liabilities",  "noncurrent_liabilities"),
+            ("Current Liabilities",      "current_liabilities"),
+            ("Borrowings (Non-current)", "borrowings_noncurrent"),
+            ("Borrowings (Current)",     "borrowings_current"),
+            ("Deposits (Bank)",          "deposits_bank"),
+            ("Debt Securities",          "debt_securities"),
+            ("Subordinated Liabilities", "subordinated_liab"),
+            ("Trade Payables",           "trade_payables"),
+            ("Other Current Liab.",      "other_current_liab"),
+            ("Other Non-current Liab.",  "other_noncurrent_liab"),
+            ("Provisions (Current)",     "provisions_current"),
+            ("Provisions (Non-current)", "provisions_noncurrent"),
+            ("Deferred Tax Liab.",       "deferred_tax_liab"),
+            ("Current Tax Liab.",        "current_tax_liab"),
+            ("Other Fin. Liab.",         "other_fin_liab"),
+            ("Financial Liab. (Bank)",   "financial_liab_bank"),
+            ("Other Liab. & Prov.",      "other_liab_provisions"),
+        ],
+        "Cash Flow": [
+            ("CFO (Operating)",          "cfo"),
+            ("CFI (Investing)",          "cfi"),
+            ("CFF (Financing)",          "cff"),
+            ("CapEx",                    "capex"),
+            ("Free Cash Flow",           "free_cash_flow"),
+            ("Cash (End of Period)",     "cash_end"),
+            ("Net Change in Cash",       "net_change_cash"),
+            ("Interest Paid",            "interest_paid_cf"),
+            ("Tax Paid",                 "tax_paid_cf"),
+            ("Dividends Paid",           "dividends_paid"),
+            ("Proceeds from Borrowings", "proceeds_borrowings"),
+            ("Repayments of Borrowings", "repayments_borrowings"),
+        ],
+        "Segment": [
+            ("Segment Revenue",          "segment_revenue"),
+            ("Segment Revenue (Ops)",    "segment_revenue_ops"),
+            ("Segment Profit BT",        "segment_profit_bt"),
+            ("Segment Assets",           "segment_assets"),
+            ("Segment Liabilities",      "segment_liabilities"),
+            ("Inter-segment Revenue",    "inter_segment_rev"),
+            ("Unallocable Assets",       "unallocable_assets"),
+            ("Unallocable Liabilities",  "unallocable_liab"),
+        ],
+        "Banking": [
+            ("Gross NPA",                "npa_gross_cr"),
+            ("Net NPA",                  "npa_net_cr"),
+            ("Gross NPA %",              "npa_pct_gross"),
+            ("Net NPA %",                "npa_pct_net"),
+            ("CAR / CET1",               "car"),
+            ("Additional Tier 1",        "tier1_additional"),
+            ("NII YoY %",                "nii_yoy"),
+            ("NPA Change QoQ",           "npa_change"),
+            ("Govt. Holding %",          "pct_govt_holding"),
+        ],
+    }
+
+    def fmt_val(key, val):
+        """Format value based on field type."""
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return "—", "#3d5052"
+        # Ratio/percentage fields
+        pct_fields = {"pat_margin","revenue_yoy","pat_yoy","eps_basic_yoy",
+                      "revenue_accel","margin_change_qoq","margin_change_yoy",
+                      "sue","nii_yoy","roa","npa_pct_gross","npa_pct_net",
+                      "car","tier1_additional","npa_change",
+                      "debt_equity_ratio","debt_service_ratio","interest_coverage",
+                      "pct_govt_holding"}
+        small_fields = {"eps_basic","eps_diluted","eps_basic_continuing",
+                        "eps_basic_discontinued","face_value"}
+
+        if key in pct_fields:
+            s = f"{val*100:.2f}%" if abs(val) < 1 and key not in {"sue","revenue_accel","margin_change_qoq","margin_change_yoy","revenue_yoy","pat_yoy","eps_basic_yoy","nii_yoy","npa_change","debt_equity_ratio","debt_service_ratio","interest_coverage","pct_govt_holding"} else f"{val:.2f}"
+            c = "#4ecca3" if val > 0 else "#e05252" if val < 0 else "#637b7d"
+            return s, c
+        elif key in small_fields:
+            return f"₹{val:.2f}", "#c8d0cc"
+        else:
+            return fmt_cr(val), "#c8d0cc"
+
+    # Render each group
+    for group_name, fields in GROUPS.items():
+        # Only show groups that have at least one non-null value
+        has_data = any(
+            latest.get(key) is not None and
+            not (isinstance(latest.get(key), float) and np.isnan(latest.get(key)))
+            for _, key in fields
+        )
+        if not has_data:
+            continue
+
+        st.markdown(f'<div class="section-head">{group_name.upper()}</div>',
+                    unsafe_allow_html=True)
+
         html = ""
-        for lbl, key in items:
-            accent = lbl in ("Total Income","Net Profit (PAT)","Operating Profit")
-            color  = "#4ecca3" if accent else "#c8d0cc"
+        for lbl, key in fields:
+            val = latest.get(key)
+            if val is None or (isinstance(val, float) and np.isnan(val)):
+                continue  # skip null fields entirely
+            fval, fc = fmt_val(key, val)
+            accent = key in ("pat","total_income","equity_total","total_assets","cfo","nii")
             border = "border-top:1px solid #1e2a2c;" if accent else ""
+            color  = "#4ecca3" if accent else fc
             html  += (f'<div class="data-row" style="{border}">'
                       f'<span class="data-label">{lbl}</span>'
-                      f'<span class="data-val" style="color:{color}">{fmt_cr(latest.get(key))}</span>'
+                      f'<span class="data-val" style="color:{color}">{fval}</span>'
                       f'</div>')
-        st.markdown(f'<div class="card">{html}</div>', unsafe_allow_html=True)
 
-    with c2:
+        if html:
+            st.markdown(f'<div class="card">{html}</div>', unsafe_allow_html=True)
+
+    # Waterfall always shown if revenue available
+    if latest.get("revenue"):
         st.markdown('<div class="section-head">MARGIN WATERFALL</div>', unsafe_allow_html=True)
         rev   = latest.get("revenue") or 1
-        op    = latest.get("operating_profit") or 0
+        op    = latest.get("ebitda") or latest.get("operating_profit_bank") or 0
         pat_v = latest.get("pat") or 0
         tax_v = latest.get("tax") or 0
-        fig3  = waterfall_chart(rev, op, pat_v, tax_v, height=240)
+        fig3  = waterfall_chart(rev, op, pat_v, tax_v, height=220)
         st.plotly_chart(fig3, use_container_width=True)
-
-        st.markdown('<div class="section-head">YoY GROWTH RATES</div>', unsafe_allow_html=True)
-        g_items = [
-            ("Revenue YoY",      latest.get("revenue_yoy")),
-            ("PAT YoY",          latest.get("pat_yoy")),
-            ("EPS YoY",          latest.get("eps_basic_yoy")),
-            ("Margin Chg (YoY)", latest.get("margin_change_yoy")),
-            ("Margin Chg (QoQ)", latest.get("margin_change_qoq")),
-            ("NII YoY",          latest.get("nii_yoy")),
-        ]
-        html2 = ""
-        for lbl, val in g_items:
-            if val is None or (isinstance(val, float) and np.isnan(val)):
-                vs, vc = "—", "#3d5052"
-            elif val > 0:
-                vs, vc = f"+{val:.1f}%", "#4ecca3"
-            elif val < 0:
-                vs, vc = f"{val:.1f}%", "#e05252"
-            else:
-                vs, vc = "0.0%", "#637b7d"
-            html2 += (f'<div class="data-row"><span class="data-label">{lbl}</span>'
-                      f'<span class="data-val" style="color:{vc}">{vs}</span></div>')
-        st.markdown(f'<div class="card">{html2}</div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — FACTORS
