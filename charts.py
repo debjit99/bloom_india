@@ -61,7 +61,7 @@ def bar_chart(
     layout = _layout(height,
         barmode    = "group",
         showlegend = y2 is not None,
-        legend     = dict(font=dict(size=9, color=MUTED), bgcolor="rgba(0,0,0,0)", x=0, y=1),
+        legend     = dict(font=dict(size=9, color=MUTED), bgcolor="transparent", x=0, y=1),
         yaxis      = dict(gridcolor=GRID, tickformat=",", tickfont=dict(size=9)),
         yaxis2     = dict(overlaying="y", side="right", gridcolor="#141d1e",
                           tickformat=",", tickfont=dict(size=9)) if y2 else {},
@@ -184,7 +184,7 @@ def npa_bar_chart(npa_df: "pd.DataFrame", height: int = 220) -> go.Figure:
         ))
     fig.update_layout(**_layout(height,
         showlegend=True,
-        legend=dict(font=dict(size=9, color=MUTED), bgcolor="rgba(0,0,0,0)"),
+        legend=dict(font=dict(size=9, color=MUTED), bgcolor="transparent"),
         yaxis=dict(ticksuffix="%", gridcolor=GRID, tickfont=dict(size=9)),
     ))
     return fig

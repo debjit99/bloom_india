@@ -1,42 +1,34 @@
 # bloom_india/config.yaml
 # ========================
-# Edit the paths below before running anything.
-# All other settings have sensible defaults.
+# Only one thing to set: base_dir
+# Everything else is derived automatically.
+#
+# Directory layout (all created automatically):
+#   base_dir/
+#     raw/
+#       xbrl/               <- NSE XBRL filing JSONs
+#       bhavcopy/           <- NSE daily price CSVs
+#       announce_dates.json <- BSE announcement dates
+#     db/
+#       prices.parquet      <- built price database
+#       fundamentals.parquet<- built fundamental database
+#       corp_actions.parquet<- corporate actions database
 #
 # After cloning:
-#   1. Copy this file:  cp config.yaml.example config.yaml
-#   2. Set storage.base_dir to wherever you want data stored
-#   3. Run:  python -m bloom_india.setup
+#   cp config.yaml.example config.yaml
+#   Edit base_dir below.
 #
-# config.yaml is in .gitignore — your paths stay private.
+# config.yaml is in .gitignore -- your paths stay private.
 
-# ── Storage ────────────────────────────────────────────────────────────────────
 storage:
-  # Root directory for all downloaded and processed data.
-  # Every other path below is relative to this unless you set it explicitly.
-  # Use absolute paths or ~ for home dir.
   base_dir: "~/bloom_india_data"
 
-  # Raw downloaded files (never modified after download)
-  raw_dir: null            # default: base_dir/raw
-  xbrl_dir: null           # default: raw_dir/xbrl
-  bhavcopy_dir: null       # default: raw_dir/bhavcopy
-  announce_dates_file: null # default: raw_dir/announce_dates.json
-
-  # Processed databases (built from raw files)
-  db_dir: null             # default: base_dir/db
-  price_db: null           # default: db_dir/prices.parquet
-  fundamental_db: null     # default: db_dir/fundamentals.parquet
-  corp_actions_db: null    # default: db_dir/corp_actions.parquet
-
-# ── Fetch settings ─────────────────────────────────────────────────────────────
 fetch:
-  request_delay_sec: 0.5   # polite delay between NSE/BSE requests
+  request_delay_sec: 0.5
   max_retries: 3
   timeout_sec: 20
   user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 
-# ── Universe ───────────────────────────────────────────────────────────────────
 universe:
   default_index: "NIFTY 50"
   supported:
@@ -44,20 +36,16 @@ universe:
     - "NIFTY 100"
     - "NIFTY NEXT 50"
 
-# ── Data range ─────────────────────────────────────────────────────────────────
 data:
-  # Earliest reliable date for each data type
-  price_floor:       "2010-01-01"   # NSE bhavcopy archive
-  fundamental_floor: "2018-04-01"   # NSE XBRL filings
+  price_floor:       "2010-01-01"
+  fundamental_floor: "2018-04-01"
 
-# ── Backtest defaults ──────────────────────────────────────────────────────────
 backtest:
   default_hold_days: 20
   default_n_long: 5
   default_n_short: 5
-  min_stocks_for_signal: 4   # min stocks with valid scores to trade
+  min_stocks_for_signal: 4
 
-# ── Terminal ───────────────────────────────────────────────────────────────────
 terminal:
   port: 8501
   host: "localhost"

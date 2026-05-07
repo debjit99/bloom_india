@@ -127,7 +127,6 @@ ql   = latest.get("quarter_label", "—")
 ann  = str(latest.get("announce_date", ""))[:10]
 cons = "Consolidated" if latest.get("consolidated", True) else "Standalone"
 
-bank_badge = '<span class="badge badge-green">BANK</span>' if is_bank else ""
 st.markdown(
     f'<div style="display:flex;align-items:baseline;gap:10px;'
     f'padding:10px 0 8px;border-bottom:1px solid #1e2a2c;margin-bottom:12px">'
@@ -136,7 +135,7 @@ st.markdown(
     f'<span class="badge badge-green">{ql}</span>'
     f'<span class="badge">Filed {ann}</span>'
     f'<span class="badge">{cons}</span>'
-    f'{bank_badge}'
+    f'{"<span class=\\"badge badge-green\\">BANK</span>" if is_bank else ""}'
     f'</div>',
     unsafe_allow_html=True,
 )
