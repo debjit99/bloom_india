@@ -249,7 +249,7 @@ def fetch_bhavcopy(
     return None
 
 
-# ── Range fetch ───────────────────────────────────────────────────────────────
+# ── Range fetch (sequential) ──────────────────────────────────────────────────
 
 def fetch_bhavcopy_range(
     from_date:  str,
@@ -257,24 +257,22 @@ def fetch_bhavcopy_range(
     symbols:    Optional[list] = None,
     series:     Optional[set]  = None,
     verbose:    bool           = True,
+    workers:    int            = 1,
 ) -> pd.DataFrame:
     """
-    Download NSE bhavcopy for a date range and return a combined DataFrame.
-
-    Args:
-        from_date : 'YYYY-MM-DD' start date (inclusive)
-        to_date   : 'YYYY-MM-DD' end date (inclusive)
-        symbols   : optional list of NSE symbols to filter to
-        series    : equity series to keep (default: EQ, BE, BZ, SM, ST)
-        verbose   : print progress
-
-    Returns:
-        Combined DataFrame sorted by Date, Symbol.
-        Empty DataFrame if no data found.
+    Download NSE bhavcopy for a date range.
+    Set workers > 1 for parallel fetching (recommended: 4-6).
     """
+    if workers > 1:
+        return fetch_bhavcopy_range_parallel(
+            from_date, to_date,
+            symbols=symbols, series=series,
+            verbose=verbose, workers=workers,
+        )
+
     start  = datetime.date.fromisoformat(from_date)
     end    = datetime.date.fromisoformat(to_date)
-    dates  = pd.date_range(start, end, freq="B")   # business days only
+    dates  = pd.date_range(start, end, freq="B")
 
     if verbose:
         print(f"Fetching bhavcopy: {from_date} → {to_date}  ({len(dates)} business days)")
@@ -299,7 +297,6 @@ def fetch_bhavcopy_range(
             if verbose:
                 print(f"  [error] {ds}: {e}")
 
-        # Progress
         if verbose and (i + 1) % 50 == 0:
             print(f"  {i+1}/{len(dates)} days  frames={len(frames)}  errors={errors}")
 
@@ -315,7 +312,116 @@ def fetch_bhavcopy_range(
     if verbose:
         print(f"Done: {len(out)} rows, {out['Symbol'].nunique()} symbols, "
               f"{out['Date'].nunique()} dates, {errors} errors")
+    return out
 
+
+# ── Range fetch (parallel) ────────────────────────────────────────────────────
+
+def fetch_bhavcopy_range_parallel(
+    from_date:  str,
+    to_date:    str,
+    symbols:    Optional[list] = None,
+    series:     Optional[set]  = None,
+    verbose:    bool           = True,
+    workers:    int            = 5,
+) -> pd.DataFrame:
+    """
+    Download NSE bhavcopy for a date range using parallel workers.
+
+    Each worker gets its own NSE session. Dates are split across workers.
+    NSE is generally okay with 4-6 parallel connections — don't go above 8.
+
+    Args:
+        from_date : 'YYYY-MM-DD'
+        to_date   : 'YYYY-MM-DD'
+        symbols   : filter to these symbols (default: all)
+        series    : equity series filter (default: EQ,BE,BZ,SM,ST)
+        verbose   : print progress
+        workers   : parallel threads (default 5, max recommended 8)
+
+    Returns:
+        Combined DataFrame sorted by Date, Symbol.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    start  = datetime.date.fromisoformat(from_date)
+    end    = datetime.date.fromisoformat(to_date)
+    dates  = [dt.strftime("%Y-%m-%d")
+              for dt in pd.date_range(start, end, freq="B")]
+
+    if verbose:
+        print(f"Fetching bhavcopy (parallel, {workers} workers): "
+              f"{from_date} → {to_date}  ({len(dates)} business days)")
+
+    # Thread-local sessions — one per worker
+    _local = threading.local()
+
+    def _get_sess() -> requests.Session:
+        if not hasattr(_local, "sess"):
+            _local.sess = _make_session()
+        return _local.sess
+
+    _lock   = threading.Lock()
+    counter = {"done": 0, "frames": 0, "errors": 0}
+    frames  = []
+
+    def _fetch_day(ds: str):
+        time.sleep(random.uniform(0.05, 0.3))  # small jitter
+        try:
+            df = fetch_bhavcopy(ds, session=_get_sess(), series=series)
+            if df is not None and not df.empty:
+                if symbols:
+                    df = df[df["Symbol"].isin(symbols)]
+                if not df.empty:
+                    return ds, df, None
+            return ds, None, None
+        except Exception as e:
+            err = str(e)
+            # On rate limit — back off and retry with fresh session
+            if any(x in err for x in ["429","403","rate","blocked"]):
+                time.sleep(random.uniform(5, 15))
+                try:
+                    _local.sess = _make_session()
+                    df = fetch_bhavcopy(ds, session=_get_sess(), series=series)
+                    if df is not None and not df.empty:
+                        if symbols:
+                            df = df[df["Symbol"].isin(symbols)]
+                        return ds, df if not df.empty else None, None
+                except Exception as e2:
+                    return ds, None, str(e2)
+            return ds, None, err
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_fetch_day, ds): ds for ds in dates}
+        for future in as_completed(futures):
+            ds, df, err = future.result()
+            with _lock:
+                counter["done"] += 1
+                if df is not None:
+                    frames.append(df)
+                    counter["frames"] += 1
+                if err:
+                    counter["errors"] += 1
+                if verbose and counter["done"] % 100 == 0:
+                    pct = counter["done"] / len(dates) * 100
+                    print(f"  {counter['done']:4d}/{len(dates)}  "
+                          f"({pct:5.1f}%)  "
+                          f"frames={counter['frames']}  "
+                          f"errors={counter['errors']}")
+
+    if not frames:
+        return pd.DataFrame()
+
+    out = (pd.concat(frames, ignore_index=True)
+             .sort_values(["Date","Symbol"])
+             .reset_index(drop=True))
+
+    if verbose:
+        print(f"Done: {len(out):,} rows  "
+              f"{out['Symbol'].nunique()} symbols  "
+              f"{out['Date'].nunique()} dates  "
+              f"{counter['errors']} errors")
     return out
 
 

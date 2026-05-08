@@ -218,8 +218,16 @@ with tab1:
         st.markdown(f'<div class="card">{html}</div>', unsafe_allow_html=True)
 
     with col_r:
+        _sl_col, _ = st.columns([1, 2])
+        with _sl_col:
+            n_quarters = st.slider(
+                "Quarters", min_value=4, max_value=28, value=12, step=1,
+                key="n_quarters_overview",
+                help="Number of quarters to display in charts",
+            )
+
         st.markdown('<div class="section-head">QUARTERLY TREND</div>', unsafe_allow_html=True)
-        plot_df = sym_df.dropna(subset=["revenue","pat"]).tail(12)
+        plot_df = sym_df.dropna(subset=["revenue","pat"]).tail(n_quarters)
         if not plot_df.empty:
             fig = bar_chart(
                 x       = plot_df["quarter_label"].tolist(),
@@ -232,7 +240,7 @@ with tab1:
             st.plotly_chart(fig, use_container_width=True)
 
         st.markdown('<div class="section-head">PAT MARGIN TREND</div>', unsafe_allow_html=True)
-        m_df = sym_df.dropna(subset=["pat_margin"]).tail(12)
+        m_df = sym_df.dropna(subset=["pat_margin"]).tail(n_quarters)
         if not m_df.empty:
             fig2 = line_chart(
                 x      = m_df["quarter_label"].tolist(),
@@ -481,7 +489,7 @@ with tab3:
                 f'</div>',
                 unsafe_allow_html=True,
             )
-            sue_df = sym_df.dropna(subset=["sue"]).tail(12)
+            sue_df = sym_df.dropna(subset=["sue"]).tail(n_quarters if "n_quarters_overview" in st.session_state else 12)
             if not sue_df.empty:
                 colors = ["#4ecca3" if v > 0 else "#e05252" for v in sue_df["sue"]]
                 import plotly.graph_objects as go
@@ -584,7 +592,7 @@ with tab4:
     if not panel.empty and selected in panel["Symbol"].values:
         st.markdown('<div class="section-head">PRICE HISTORY  ◆ = earnings announcement</div>',
                     unsafe_allow_html=True)
-        px_df  = panel[panel["Symbol"]==selected].sort_values("Date").tail(500)
+        px_df  = panel[panel["Symbol"]==selected].sort_values("Date")
         import plotly.graph_objects as go
         fig_p  = go.Figure()
         fig_p.add_trace(go.Scatter(
@@ -670,14 +678,14 @@ with tab5:
         col_l, col_r = st.columns(2)
         with col_l:
             st.markdown('<div class="section-head">NPA HISTORY</div>', unsafe_allow_html=True)
-            npa_df = sym_df.dropna(subset=["npa_pct_gross"]).tail(10)
+            npa_df = sym_df.dropna(subset=["npa_pct_gross"]).tail(20)
             if not npa_df.empty:
                 fig_npa = npa_bar_chart(npa_df, height=220)
                 st.plotly_chart(fig_npa, use_container_width=True)
 
         with col_r:
             st.markdown('<div class="section-head">NII TREND</div>', unsafe_allow_html=True)
-            nii_df = sym_df.dropna(subset=["nii"]).tail(10)
+            nii_df = sym_df.dropna(subset=["nii"]).tail(20)
             if not nii_df.empty:
                 fig_nii = bar_chart(
                     x=nii_df["quarter_label"].tolist(),

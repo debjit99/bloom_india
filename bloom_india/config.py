@@ -94,6 +94,7 @@ def _build_storage(raw: dict) -> dict:
         "announce_dates_file": raw_dir / "announce_dates.json",
         "db_dir":              db_dir,
         "price_db":            db_dir / "prices.parquet",
+        "price_raw_db":        db_dir / "prices_raw.parquet",
         "fundamental_db":      db_dir / "fundamentals.parquet",
         "corp_actions_db":     db_dir / "corp_actions.parquet",
     }
