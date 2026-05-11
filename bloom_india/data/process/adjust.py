@@ -91,37 +91,79 @@ VOL_COL    = "Volume"
 DEMERGER_FACTORS: dict[str, list[tuple]] = {
     # ── Demergers — factors from NSE futures settle price ratio ───────────────
     # Source: masaki93trades/eqExperiment1 demerger_database.csv
-    # factor = FUT_SETTLE_PRE / FUT_SETTLE_POST on ex-date
-    "AARTIIND":   [("2019-07-03", 1.0705),   # AARTISURF  (eq ratio)
-                   ("2022-10-19", 1.0896)],  # AARTIDRUGS (fut ratio)
-    "ABB":        [("2019-12-20", 1.1469)],  # ABREL (eq ratio)
-    "ADANIENT":   [("2018-04-05", 1.0195),   # ADANITRANS (fut ratio)
-                   ("2018-09-06", 1.2793)],  # ADANIGAS   (fut ratio) ← was wrong before
-    "ARVIND":     [("2018-11-28", 2.8602)],  # ARVINDFASN (fut ratio) ← was wrong before
-    "BEML":       [("2022-09-08", 1.1566)],  # BEMLLTD    (eq ratio)
-    "BSOFT":      [("2019-01-24", 1.6782)],  # KPITTECH   (fut ratio)
-    "CENTURYTEX": [("2019-10-11", 2.2377)],  # ULTRACEMCO (fut ratio)
-    "CESC":       [("2018-10-30", 1.2040)],  # SPENCERS   (fut ratio) ← corrected
-    "GRASIM":     [("2017-07-19", 1.2399)],  # ABCAPITAL  (fut ratio) ← corrected
-    "MOTHERSON":  [("2022-01-14", 1.2617)],  # SAMIL      (fut ratio)
-    "NMDC":       [("2022-10-27", 1.2441)],  # NMDCSTEEL  (fut ratio) ← corrected
-    "PEL":        [("2022-08-30", 1.7976)],  # PPLPHARMA  (fut ratio) ← corrected
-    "RELCAPITAL": [("2017-09-05", 1.1006)],  # RNAM       (fut ratio)
-    "RELIANCE":   [("2023-07-20", 1.0823)],  # JIOFIN     (fut ratio) ← corrected
-    "SINTEX":     [("2017-05-25", 3.9962)],  # SINTEXBFRL (fut ratio)
-    "TATACHEM":   [("2020-03-04", 2.2911)],  # TATACONSUMER (fut ratio) ← corrected
-    "TATACOMM":   [("2019-09-17", 1.1623)],  # restructuring (eq ratio)
+    "AARTIIND":   [("2019-07-03", 1.0705),
+                   ("2022-10-19", 1.0896)],
+    "ABB":        [("2019-12-20", 1.1469)],
+    "ADANIENT":   [("2018-04-05", 1.0195),
+                   ("2018-09-06", 1.2793)],
+    "ARVIND":     [("2018-11-28", 2.8602)],
+    "BEML":       [("2022-09-08", 1.1566)],
+    "BSOFT":      [("2019-01-24", 1.6782)],
+    "CENTURYTEX": [("2019-10-11", 2.2377)],
+    "CESC":       [("2018-10-30", 1.2040),   # SPENCERS demerger
+                   ("2021-09-17", 10.0)],    # Split 10:1
+    "GRASIM":     [("2017-07-19", 1.2399)],
+    "MOTHERSON":  [("2022-01-14", 1.2617)],
+    "NMDC":       [("2022-10-27", 1.2441)],
+    "PEL":        [("2022-08-30", 1.7976)],
+    "RELCAPITAL": [("2017-09-05", 1.1006)],
+    "RELIANCE":   [("2023-07-20", 1.0823)],
+    "SINTEX":     [("2017-05-25", 3.9962)],
+    "TATACHEM":   [("2020-03-04", 2.2911)],
+    "TATACOMM":   [("2019-09-17", 1.1623)],
 
-    # ── Splits/bonuses missing from NSE API (>5 years old) ───────────────────
-    # Verified from raw bhavcopy price ratio on ex-date
-    "HCLTECH":    [("2019-12-05", 2.0)],     # Bonus 1:1 confirmed ratio=2.006
+    # ── Demergers — verified from raw bhavcopy ratio ──────────────────────────
+    "SIEMENS":    [("2025-04-07", 1.7523)],
+    "KPRMILL":    [("2021-09-24", 4.5470)],
+    "PCBL":       [("2022-04-11", 1.8495)],
+    "ANANTRAJ":   [("2020-10-06", 1.7813)],
+    "CGCL":       [("2024-03-05", 3.3333)],
 
-    # ── Manual entries from corp_actions.csv (not in NSE API) ────────────────
-    # INFIBEAM: Rs10→Rs1 split on 2017-08-31 (factor=10)
-    # MCDOWELL-N: Rs10→Rs2 split on 2018-06-15 (factor=5)
-    # CADILAHC: Rs5→Rs1 split on 2015-10-06 (factor=5, pre-2018 floor)
+    # ── Splits 10:1 (Rs10→Re1) ────────────────────────────────────────────────
+    "NESTLEIND":  [("2024-01-05", 10.0)],
+    "EICHERMOT":  [("2020-08-24", 10.0)],
+    "TATASTEEL":  [("2022-07-28", 10.0)],
+    "BAJAJFINSV": [("2022-09-13", 10.0)],
+    "SAREGAMA":   [("2022-04-26", 10.0)],
+    "ANGELONE":   [("2026-02-26", 10.0)],
+    "PGEL":       [("2024-07-10", 10.0)],
+    "SARDAEN":    [("2023-08-04", 10.0)],
+    "TATAINVEST": [("2025-10-14", 10.0)],
+    "BAJFINANCE": [("2025-06-16", 10.0)],
     "INFIBEAM":   [("2017-08-31", 10.0)],
+    "IEX":        [("2018-10-19", 10.0)],    # Split 10:1 confirmed ratio=10.09
+
+    # ── Splits 5:1 ────────────────────────────────────────────────────────────
+    "KOTAKBANK":  [("2026-01-14",  5.0)],
+    "DRREDDY":    [("2024-10-28",  5.0)],
+    "GPIL":       [("2024-10-04",  5.0)],
     "MCDOWELL-N": [("2018-06-15",  5.0)],
+
+    # ── Splits 4:1 ────────────────────────────────────────────────────────────
+    "360ONE":     [("2023-03-02",  4.0)],
+
+    # ── Splits 3:1 ────────────────────────────────────────────────────────────
+    "ABFRL":      [("2025-05-22",  3.0)],
+    "VEDL":       [("2026-04-30",  3.0)],
+
+    # ── Bonus 1:1 (2x) ────────────────────────────────────────────────────────
+    "HCLTECH":    [("2019-12-05",  2.0)],
+    "TCS":        [("2018-05-31",  2.0)],
+    "BRITANNIA":  [("2018-11-29",  2.0)],
+    "EMAMILTD":   [("2018-06-21",  2.0)],
+    "ELECON":     [("2024-07-19",  2.0)],
+    "JBCHEPHARM": [("2023-09-18",  2.0)],
+    "JINDALSAW":  [("2024-10-09",  2.0)],
+    "JBMA":       [("2025-01-31",  2.0)],
+    "NAVA":       [("2025-01-20",  2.0)],
+    "NBCC":       [("2018-04-25",  2.0)],
+    "IPCALAB":    [("2022-01-10",  2.0)],
+    "CONCOR":     [("2018-06-26",  2.0)],
+    "IIFL":       [("2019-05-30",  2.0)],
+
+    # ── Other verified events ─────────────────────────────────────────────────
+    "IRB":        [("2023-02-22",  8.74)],
+    "OIL":        [("2018-03-27",  1.58)],
 }
 
 
@@ -224,6 +266,19 @@ def fetch_corp_actions(
     sym  = symbol.upper()
     rows = []
 
+    # ── Hardcoded factors first — these take priority over NSE API ────────────
+    hardcoded_dates = set()
+    for ex_date_str, factor in DEMERGER_FACTORS.get(sym, []):
+        ex_date = datetime.date.fromisoformat(ex_date_str)
+        hardcoded_dates.add(ex_date)
+        rows.append({
+            "symbol":       sym,
+            "ex_date":      ex_date,
+            "subject":      f"Hardcoded factor={factor}",
+            "event_type":   "demerger",
+            "scale_factor": factor,
+        })
+
     # ── NSE API ───────────────────────────────────────────────────────────────
     try:
         resp = sess.get(
@@ -259,22 +314,16 @@ def fetch_corp_actions(
         if ex_date < DATE_FLOOR:
             continue
 
+        # Skip if hardcoded factor already covers this date
+        if ex_date in hardcoded_dates:
+            continue
+
         event_type = "split" if _parse_split_factor(subject) else "bonus"
         rows.append({
             "symbol":       sym,
             "ex_date":      ex_date,
             "subject":      subject,
             "event_type":   event_type,
-            "scale_factor": factor,   # > 1, multiply PRE-event prices
-        })
-
-    # ── Demerger factors ──────────────────────────────────────────────────────
-    for ex_date_str, factor in DEMERGER_FACTORS.get(sym, []):
-        rows.append({
-            "symbol":       sym,
-            "ex_date":      datetime.date.fromisoformat(ex_date_str),
-            "subject":      f"Demerger (hardcoded factor={factor})",
-            "event_type":   "demerger",
             "scale_factor": factor,
         })
 
