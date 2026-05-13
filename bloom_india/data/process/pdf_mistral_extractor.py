@@ -461,61 +461,48 @@ def extract_pdf_fields(
     xbrl_row:      dict = None,
     force:         bool = False,
     verbose:       bool = True,
+    log_cb=None,          # callback(line: str) — called after every log event
 ) -> dict:
     """
     Extract all financial fields from a PDF using Mistral.
 
     Args:
-        symbol        : NSE ticker e.g. "HDFCBANK"
-        pdf_stem      : PDF filename stem e.g. "Q1_FY2025_Results"
-        page_results  : {page_num: page_data} from pdf_extract
-        quarter_label : e.g. "Q1_FY2025" for Screener lookup
-        col_idx       : column to extract (0 = current quarter)
-        xbrl_row      : XBRL row for verification (optional)
-        use_screener  : cross-check with Screener.in
-        force         : re-extract even if cached
-        verbose       : print progress
-
-    Returns:
-        {
-          "fields":    {field: value},
-          "labels":    {field: matched_pdf_label},
-          "sources":   {field: "cache" | "mistral"},
-          "math":      [{field, status, expected, got}],
-          "screener":  {field: value},
-          "score":     0-100,
-          "verdict":   "GOOD" | "WARN" | "FAIL",
-          "issues":    [str],
-        }
+        log_cb : optional callable(str) — called in real-time for every log line.
+                 Use this to stream logs to a WebSocket or UI.
+                 Example: log_cb=lambda line: ws_queue.put(line)
     """
+    def _log(line: str):
+        log.info(line)
+        if log_cb:
+            try: log_cb(line)
+            except Exception: pass
+
     if verbose:
         print(f"\n{'='*60}")
         print(f"  Extracting: {symbol} / {pdf_stem}")
         print(f"{'='*60}")
 
     # ── Build page text (free, logged) ────────────────────────────────────────
-    log.info(f"Building page text for {symbol}/{pdf_stem}")
+    n_pages   = sum(1 for p in page_results.values() if p.get("has_financial_table"))
+    _log(f"  [PDF] {symbol}/{pdf_stem} — {n_pages} pages with tables")
     page_text, all_values = _build_page_text(page_results, col_idx=col_idx)
-    log.info(f"  {len(all_values)} unique values found in PDF pages")
-
-    if verbose:
-        print(f"  Pages with data: "
-              f"{sum(1 for p in page_results.values() if p.get('has_financial_table'))}")
-        print(f"  Unique values in PDF: {len(all_values)}")
+    _log(f"  [PDF] {len(all_values)} unique values extracted from pages")
 
     # ── Load cache ────────────────────────────────────────────────────────────
-    cache       = _load_cache(symbol)
-    pdf_cache   = cache.get(pdf_stem, {})
-    fields      = {}
-    labels      = {}
-    sources     = {}
+    cache     = _load_cache(symbol)
+    pdf_cache = cache.get(pdf_stem, {})
+    fields    = {}
+    labels    = {}
+    sources   = {}
 
-    # ── Extract each field ────────────────────────────────────────────────────
+    n_total   = len(FIELDS)
     n_cached  = 0
     n_mistral = 0
     n_failed  = 0
 
-    for field, (question, is_ratio) in FIELDS.items():
+    # ── Extract each field ────────────────────────────────────────────────────
+    for i, (field, (question, is_ratio)) in enumerate(FIELDS.items(), 1):
+        prefix = f"  [{i:2d}/{n_total}]"
 
         # Check cache first (free)
         if not force and field in pdf_cache:
@@ -526,53 +513,54 @@ def extract_pdf_fields(
                 labels[field]  = cached.get("label", "")
                 sources[field] = "cache"
                 n_cached += 1
-                log.info(f"  [CACHE] {field} = {val}")
+                _log(f"{prefix} [CACHE] {field:<28} = {val}")
                 continue
 
         # Call Mistral (expensive — cache result immediately)
+        _log(f"{prefix} [MISTRAL→] {field:<28} asking...")
         time.sleep(RATE_LIMIT_DELAY)
         result = _ask_mistral(page_text, field, question, is_ratio)
         val    = result.get("value")
         error  = result.get("error")
 
         if error:
-            log.warning(f"  [FAIL] {field}: {error}")
+            _log(f"{prefix} [FAIL] {field}: {error}")
             n_failed += 1
-            # Cache the failure to avoid retrying
             pdf_cache[field] = {"value": None, "label": None,
                                 "confidence": 0.0, "error": error}
-            cache[pdf_stem]  = pdf_cache
-            _save_cache(symbol, cache)   # ← cache immediately after every call
+            cache[pdf_stem] = pdf_cache
+            _save_cache(symbol, cache)
             continue
 
         # Anti-hallucination: value must exist in raw data
         if val is not None and not _value_exists_in_data(val, all_values):
-            log.warning(f"  [HALLUCINATION] {field}: {val} not found in raw data — discarding")
+            _log(f"{prefix} [HALLUCINATION] {field}: {val} not in raw data — discarded")
             val = None
             n_failed += 1
 
         # Store result
-        pdf_cache[field] = {
-            "value":      val,
-            "label":      result.get("label",""),
-            "confidence": result.get("confidence", 0.0),
-        }
+        lbl  = result.get("label","")
+        conf = result.get("confidence", 0.0)
+        pdf_cache[field] = {"value": val, "label": lbl, "confidence": conf}
         cache[pdf_stem]  = pdf_cache
         _save_cache(symbol, cache)   # ← cache immediately after every Mistral call
 
         if val is not None:
             fields[field]  = val
-            labels[field]  = result.get("label","")
+            labels[field]  = lbl
             sources[field] = "mistral"
             n_mistral += 1
-            log.info(f"  [MISTRAL] {field} = {val} ('{result.get('label','')[:50]}')")
+            _log(f"{prefix} [MISTRAL←] {field:<28} = {val}  '{lbl[:40]}'")
         else:
             n_failed += 1
-            log.warning(f"  [NULL] {field}: Mistral returned null")
+            _log(f"{prefix} [NULL]     {field:<28} Mistral returned null")
 
-    # ── Math checks (free) ────────────────────────────────────────────────────
-    log.info("Running math consistency checks...")
+    # ── Math checks ───────────────────────────────────────────────────────────
+    _log(f"  [MATH] Running consistency checks...")
     math_results = _math_verify(fields)
+    for mc in math_results:
+        s = "✓" if mc["status"]=="PASS" else "⚠" if mc["status"]=="WARN" else "✗"
+        _log(f"  [MATH] {s} {mc['field']:<25} exp={mc['expected']:.2f} got={mc['got']:.2f} ({mc['diff_pct']:.1f}%)")
 
     # ── Verdict ───────────────────────────────────────────────────────────────
     score, verdict, issues = _compute_verdict(fields, math_results, xbrl_row)
@@ -627,12 +615,11 @@ def extract_pdf_fields(
 # ── Symbol-level runner ────────────────────────────────────────────────────────
 
 def extract_symbol_pdfs(
-    symbol:       str,
+    symbol:          str,
     raw_extractions: dict,
-    db:           object = None,   # pandas DataFrame (fundamentals)
-    use_screener: bool   = True,
-    force:        bool   = False,
-    verbose:      bool   = True,
+    db:              object = None,
+    force:           bool   = False,
+    verbose:         bool   = True,
 ) -> dict:
     """
     Extract all PDFs for a symbol from raw_extractions.json.
@@ -680,7 +667,6 @@ def extract_symbol_pdfs(
             page_results  = page_results,
             quarter_label = quarter_label,
             xbrl_row      = xbrl_row,
-            use_screener  = use_screener,
             force         = force,
             verbose       = verbose,
         )

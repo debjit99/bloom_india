@@ -1,0 +1,1374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>bloom_india · PDF × XBRL Verify</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap');
+
+:root {
+  --bg:      #020c14;
+  --bg1:     #061525;
+  --bg2:     #0a1e2e;
+  --border:  #0d2035;
+  --text:    #c9d8e8;
+  --dim:     #334155;
+  --muted:   #1e3a52;
+  --blue:    #38bdf8;
+  --blue2:   #7dd3fc;
+  --green:   #22c55e;
+  --yellow:  #f59e0b;
+  --red:     #ef4444;
+  --purple:  #a855f7;
+  --pink:    #f472b6;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'IBM Plex Mono', monospace;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Header ── */
+.hdr {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.hdr-title { font-size: 16px; font-weight: 800; color: var(--blue); letter-spacing: -0.02em; }
+.hdr-sub   { font-size: 9px; color: var(--muted); letter-spacing: 0.18em; }
+.hdr-status { margin-left: auto; font-size: 10px; color: var(--muted); }
+.hdr-status.running { color: var(--blue); animation: blink 1.4s ease infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+/* ── Controls ── */
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+select, input[type=text] {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  padding: 5px 10px;
+  border-radius: 3px;
+  outline: none;
+}
+select:focus, input:focus { border-color: var(--blue); }
+
+.btn {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 6px 16px;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-run  { background: var(--blue); color: var(--bg); }
+.btn-run:hover { background: var(--blue2); }
+.btn-run:disabled { background: var(--bg1); color: var(--muted); cursor: not-allowed; }
+.btn-stop { background: #2a0a0a; color: var(--red); border: 1px solid #991b1b; }
+.btn-stop:hover { background: #3d0f0f; }
+.btn-ghost { background: var(--bg1); color: var(--dim); border: 1px solid var(--border); }
+.btn-ghost:hover { border-color: var(--dim); }
+
+.check-wrap { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: 11px; cursor: pointer; }
+.check-wrap input { accent-color: var(--blue); cursor: pointer; }
+
+/* ── Progress ── */
+.prog-bar {
+  height: 3px;
+  background: var(--bg1);
+  flex-shrink: 0;
+}
+.prog-fill {
+  height: 3px;
+  background: var(--blue);
+  transition: width 0.4s ease;
+}
+.prog-label {
+  padding: 3px 20px;
+  font-size: 9px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+/* ── Main layout ── */
+.main {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ── Left panel: symbol list ── */
+.panel-left {
+  width: 280px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.panel-hdr {
+  padding: 8px 12px;
+  font-size: 9px;
+  color: var(--muted);
+  letter-spacing: 0.12em;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.sym-list {
+  flex: 1;
+  overflow-y: auto;
+}
+.sym-row {
+  display: grid;
+  grid-template-columns: 1fr 70px 36px;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(13,32,53,0.5);
+  cursor: pointer;
+  align-items: center;
+  transition: background 0.1s;
+}
+.sym-row:hover { background: var(--bg1); }
+.sym-row.active { background: var(--bg2); border-left: 2px solid var(--blue); }
+.sym-name { color: var(--blue2); font-weight: 600; font-size: 11px; }
+.sym-name.running-sym { color: var(--purple); animation: blink 1s ease infinite; }
+.sym-ql { color: var(--dim); font-size: 10px; }
+.sym-score {
+  font-size: 10px;
+  font-weight: 700;
+  text-align: right;
+}
+
+/* ── Stats bar ── */
+.stats-bar {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.stat-item {
+  flex: 1;
+  padding: 6px 8px;
+  text-align: center;
+  border-right: 1px solid var(--border);
+}
+.stat-item:last-child { border-right: none; }
+.stat-n { font-size: 16px; font-weight: 800; line-height: 1; }
+.stat-l { font-size: 8px; color: var(--muted); letter-spacing: 0.1em; margin-top: 1px; }
+
+/* ── Right panel: detail ── */
+.panel-right {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Tabs ── */
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.tab {
+  padding: 8px 18px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+
+/* ── Tab content ── */
+.tab-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 18px;
+}
+.tab-pane { display: none; }
+.tab-pane.active { display: block; }
+
+/* ── Badges ── */
+.badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 2px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.badge-good   { background:#052e16; color:var(--green);  border:1px solid #166534; }
+.badge-warn   { background:#1c1003; color:var(--yellow); border:1px solid #92400e; }
+.badge-fail   { background:#2a0a0a; color:var(--red);    border:1px solid #991b1b; }
+.badge-new    { background:#0c1a2e; color:var(--blue);   border:1px solid #0369a1; }
+.badge-nopdf  { background:#111;    color:var(--dim);    border:1px solid var(--border); }
+.badge-error  { background:#1a0010; color:var(--pink);   border:1px solid #9d174d; }
+.badge-run    { background:#1a0533; color:var(--purple); border:1px solid #7e22ce; }
+
+/* ── Field table ── */
+.ftable { width: 100%; border-collapse: collapse; font-size: 11px; }
+.ftable th {
+  text-align: left;
+  font-size: 9px;
+  color: var(--muted);
+  letter-spacing: 0.1em;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 400;
+}
+.ftable td {
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(13,32,53,0.5);
+  vertical-align: middle;
+}
+.ftable tr:hover td { background: var(--bg1); }
+.field-name { color: var(--dim); font-family: monospace; }
+.field-val  { text-align: right; color: var(--text); font-family: monospace; }
+.field-xbrl { text-align: right; color: var(--dim); font-family: monospace; }
+.field-match { text-align: center; font-weight: 700; font-size: 12px; }
+.field-label { color: var(--muted); font-size: 10px; overflow: hidden;
+               white-space: nowrap; text-overflow: ellipsis; max-width: 220px; }
+.ok   { color: var(--green); }
+.warn { color: var(--yellow); }
+.err  { color: var(--red); }
+
+/* ── Math check row ── */
+.math-row {
+  display: flex;
+  gap: 10px;
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(13,32,53,0.5);
+  align-items: center;
+  font-size: 11px;
+}
+.math-row:hover { background: var(--bg1); }
+
+/* ── Log box ── */
+.logbox {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 10px 14px;
+  font-size: 10px;
+  line-height: 1.7;
+  font-family: 'IBM Plex Mono', monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.log-ok   { color: var(--green); }
+.log-warn { color: var(--yellow); }
+.log-err  { color: var(--red); }
+.log-info { color: var(--blue); }
+.log-dim  { color: var(--muted); }
+
+/* ── Section header ── */
+.sec-hdr {
+  font-size: 9px;
+  color: var(--muted);
+  letter-spacing: 0.12em;
+  margin: 14px 0 8px;
+}
+.sec-hdr:first-child { margin-top: 0; }
+
+/* ── Score chart ── */
+.score-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 3px 0;
+  font-size: 10px;
+}
+.score-bar-label { width: 46px; color: var(--dim); }
+.score-bar-track { flex: 1; background: var(--bg1); height: 12px; border-radius: 2px; }
+.score-bar-fill  { height: 12px; border-radius: 2px; }
+.score-bar-n     { width: 24px; text-align: right; color: var(--dim); }
+
+/* ── Hit rate bar ── */
+.hit-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 0;
+  font-size: 10px;
+}
+.hit-label { width: 190px; color: var(--dim); font-family: monospace; white-space: nowrap; overflow: hidden; }
+.hit-track { flex: 1; background: var(--bg1); height: 10px; border-radius: 2px; }
+.hit-fill  { height: 10px; border-radius: 2px; }
+.hit-pct   { width: 36px; text-align: right; }
+
+/* ── Search input ── */
+.search-wrap {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.search-wrap input { flex: 1; }
+
+/* ── tqdm field progress ── */
+.tqdm-wrap {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+}
+.tqdm-sym {
+  color: var(--blue);
+  font-weight: 700;
+  margin-bottom: 6px;
+  font-size: 11px;
+}
+.tqdm-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0;
+  font-size: 10px;
+}
+.tqdm-field { width: 180px; color: var(--dim); white-space: nowrap; overflow: hidden; }
+.tqdm-track { flex: 1; background: var(--bg1); height: 8px; border-radius: 2px; position: relative; }
+.tqdm-fill  { height: 8px; border-radius: 2px; transition: width 0.3s ease; }
+.tqdm-val   { width: 120px; color: var(--text); text-align: right; font-family: monospace; font-size: 10px; }
+.tqdm-src   { width: 50px; text-align: center; }
+.tqdm-src.cache   { color: var(--muted); }
+.tqdm-src.mistral { color: var(--blue); }
+.tqdm-src.fail    { color: var(--red); }
+.tqdm-src.pending { color: var(--muted); opacity: 0.4; }
+.tqdm-overall {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 8px; font-size: 11px;
+}
+.tqdm-overall-track { flex:1; background:var(--bg1); height:12px; border-radius:3px; }
+.tqdm-overall-fill  { height:12px; border-radius:3px; background:var(--blue); transition:width 0.3s ease; }
+
+/* ── live log stream ── */
+.live-log {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 8px 14px;
+  font-size: 10px;
+  line-height: 1.6;
+  font-family: 'IBM Plex Mono', monospace;
+  height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+.sym-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(90px,1fr));
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.sym-cell {
+  padding: 4px 6px;
+  border-radius: 2px;
+  font-size: 10px;
+  font-weight: 600;
+  text-align: center;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.15s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sym-cell:hover { border-color: var(--blue); }
+.sym-cell.pending  { background:var(--bg1); color:var(--muted); }
+.sym-cell.running  { background:#1a0533; color:var(--purple); border-color:#7e22ce;
+                     animation: blink 0.8s ease infinite; }
+.sym-cell.good     { background:#052e16; color:var(--green); }
+.sym-cell.warn     { background:#1c1003; color:var(--yellow); }
+.sym-cell.fail     { background:#2a0a0a; color:var(--red); }
+.sym-cell.new      { background:#0c1a2e; color:var(--blue); }
+.sym-cell.nopdf    { background:var(--bg); color:var(--muted); opacity:0.4; }
+.sym-cell.error    { background:#1a0010; color:var(--pink); }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* ── Empty state ── */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--muted);
+  font-size: 12px;
+  gap: 8px;
+}
+.empty-icon { font-size: 28px; opacity: 0.3; }
+
+/* ── Toast ── */
+#toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity 0.2s;
+  pointer-events: none;
+  z-index: 100;
+}
+#toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="hdr">
+  <span class="hdr-title">◈ PDF × XBRL</span>
+  <span class="hdr-sub">VERIFICATION DASHBOARD</span>
+  <div class="hdr-status" id="hdr-status">ready</div>
+</div>
+
+<!-- Controls -->
+<div class="controls">
+  <select id="sel-mode">
+    <option value="single">Single symbol</option>
+    <option value="pdfs">All with PDFs</option>
+    <option value="all">Full universe</option>
+  </select>
+
+  <select id="sel-sym" style="width:160px"></select>
+
+  <label class="check-wrap">
+    <input type="checkbox" id="chk-force"> Force re-extract
+  </label>
+
+  <button class="btn btn-run" id="btn-run" onclick="startRun()">▶ RUN</button>
+  <button class="btn btn-stop" id="btn-stop" onclick="stopRun()" style="display:none">◼ STOP</button>
+  <button class="btn btn-ghost" onclick="clearResults()">✕ Clear</button>
+
+  <div style="margin-left:auto;color:var(--muted);font-size:10px" id="ws-status">
+    ◌ connecting...
+  </div>
+</div>
+
+<!-- Progress -->
+<div class="prog-bar"><div class="prog-fill" id="prog-fill" style="width:0%"></div></div>
+<div class="prog-label" id="prog-label"></div>
+
+<!-- Live progress panel (shown while running) -->
+<div id="live-panel" style="display:none;padding:10px 20px;border-bottom:1px solid var(--border);background:var(--bg1)">
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+
+    <!-- tqdm field progress -->
+    <div>
+      <div style="font-size:9px;color:var(--muted);letter-spacing:0.12em;margin-bottom:8px">
+        FIELD EXTRACTION PROGRESS
+      </div>
+      <div class="tqdm-wrap" id="tqdm-wrap">
+        <div class="tqdm-sym" id="tqdm-sym">—</div>
+        <div class="tqdm-overall">
+          <div class="tqdm-overall-track">
+            <div class="tqdm-overall-fill" id="tqdm-overall-fill" style="width:0%"></div>
+          </div>
+          <span id="tqdm-overall-label" style="color:var(--muted);font-size:10px;white-space:nowrap">
+            0 / 0
+          </span>
+        </div>
+        <div id="tqdm-fields"></div>
+      </div>
+    </div>
+
+    <!-- Live log stream -->
+    <div>
+      <div style="font-size:9px;color:var(--muted);letter-spacing:0.12em;margin-bottom:8px">
+        LIVE LOG STREAM
+      </div>
+      <div class="live-log" id="live-log">
+        <span style="color:var(--muted)">Waiting for run...</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Main -->
+<div class="main">
+
+  <!-- Left: symbol list -->
+  <div class="panel-left">
+    <div class="stats-bar" id="stats-bar">
+      <div class="stat-item">
+        <div class="stat-n" style="color:var(--text)" id="stat-total">0</div>
+        <div class="stat-l">TOTAL</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-n" style="color:var(--green)" id="stat-good">0</div>
+        <div class="stat-l">GOOD</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-n" style="color:var(--yellow)" id="stat-warn">0</div>
+        <div class="stat-l">WARN</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-n" style="color:var(--red)" id="stat-fail">0</div>
+        <div class="stat-l">FAIL</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-n" style="color:var(--blue)" id="stat-new">0</div>
+        <div class="stat-l">NEW</div>
+      </div>
+    </div>
+
+    <div class="panel-hdr">
+      <span>SYMBOLS</span>
+      <span id="sym-count" style="color:var(--blue)">0</span>
+    </div>
+
+    <div class="sym-list" id="sym-list">
+      <div class="empty"><span class="empty-icon">◎</span>Run verification</div>
+    </div>
+  </div>
+
+  <!-- Right: tabs + detail -->
+  <div class="panel-right">
+    <div class="tabs">
+      <div class="tab active" data-tab="overview"  onclick="switchTab('overview')">OVERVIEW</div>
+      <div class="tab"        data-tab="scores"    onclick="switchTab('scores')">SCORES</div>
+      <div class="tab"        data-tab="inspector" onclick="switchTab('inspector')">INSPECTOR</div>
+      <div class="tab"        data-tab="logs"      onclick="switchTab('logs')">LOGS</div>
+    </div>
+
+    <div class="tab-content">
+
+      <!-- OVERVIEW -->
+      <div class="tab-pane active" id="tab-overview">
+        <!-- Symbol grid (tqdm map) -->
+        <div style="font-size:9px;color:var(--muted);letter-spacing:0.12em;margin-bottom:8px" id="grid-hdr" style="display:none">
+          SYMBOL MAP
+          <span style="margin-left:12px;color:var(--border)">|</span>
+          <span style="margin-left:8px">
+            <label style="cursor:pointer;margin-right:8px">
+              <input type="checkbox" id="filt-good" checked onchange="renderGrid()"> GOOD
+            </label>
+            <label style="cursor:pointer;margin-right:8px">
+              <input type="checkbox" id="filt-warn" checked onchange="renderGrid()"> WARN
+            </label>
+            <label style="cursor:pointer;margin-right:8px">
+              <input type="checkbox" id="filt-fail" checked onchange="renderGrid()"> FAIL
+            </label>
+            <label style="cursor:pointer;margin-right:8px">
+              <input type="checkbox" id="filt-new" checked onchange="renderGrid()"> NEW
+            </label>
+            <label style="cursor:pointer;margin-right:8px">
+              <input type="checkbox" id="filt-nopdf" onchange="renderGrid()"> NO_PDF
+            </label>
+            <label style="cursor:pointer">
+              <input type="checkbox" id="filt-pending" checked onchange="renderGrid()"> PENDING
+            </label>
+          </span>
+        </div>
+        <div class="sym-grid" id="sym-grid"></div>
+
+        <div class="empty" id="overview-empty">
+          <span class="empty-icon">◎</span>
+          <span>Select a mode and click ▶ RUN</span>
+        </div>
+        <div id="overview-table" style="display:none">
+          <table class="ftable" style="width:100%">
+            <thead>
+              <tr>
+                <th>SYMBOL</th><th>XBRL</th><th>PDF</th>
+                <th>STATUS</th><th style="text-align:right">SCORE</th>
+                <th>ISSUES</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="overview-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- SCORES -->
+      <div class="tab-pane" id="tab-scores">
+        <div class="empty" id="scores-empty">
+          <span class="empty-icon">◎</span><span>No verified results yet</span>
+        </div>
+        <div id="scores-content" style="display:none">
+          <div style="display:flex;gap:24px;margin-bottom:14px">
+            <div class="stat-item" style="text-align:center">
+              <div class="stat-n" style="color:var(--blue);font-size:28px" id="sc-avg">—</div>
+              <div class="stat-l">AVG SCORE</div>
+            </div>
+            <div class="stat-item" style="text-align:center">
+              <div class="stat-n" style="color:var(--blue2);font-size:28px" id="sc-med">—</div>
+              <div class="stat-l">MEDIAN</div>
+            </div>
+            <div class="stat-item" style="text-align:center">
+              <div class="stat-n" style="color:var(--dim);font-size:28px" id="sc-n">—</div>
+              <div class="stat-l">VERIFIED</div>
+            </div>
+          </div>
+          <div class="sec-hdr">SCORE DISTRIBUTION</div>
+          <div id="score-dist"></div>
+          <div class="sec-hdr" style="margin-top:18px">FIELD HIT RATE</div>
+          <div id="field-hits"></div>
+          <div class="sec-hdr" style="margin-top:18px">FAILURE PATTERNS</div>
+          <div id="fail-patterns"></div>
+        </div>
+      </div>
+
+      <!-- INSPECTOR -->
+      <div class="tab-pane" id="tab-inspector">
+        <div class="empty" id="inspector-empty">
+          <span class="empty-icon">◎</span>
+          <span>Click a symbol in the list to inspect</span>
+        </div>
+        <div id="inspector-content" style="display:none"></div>
+      </div>
+
+      <!-- LOGS -->
+      <div class="tab-pane" id="tab-logs">
+        <div class="search-wrap">
+          <input type="text" id="log-search" placeholder="Search log lines..."
+                 oninput="filterLogs()">
+          <select id="log-sym-sel" onchange="loadLog()">
+            <option>— select symbol —</option>
+          </select>
+          <button class="btn btn-ghost" onclick="downloadLog()">⬇ Download</button>
+        </div>
+        <div id="log-box" class="logbox" style="height:calc(100vh - 280px)">
+          <span style="color:var(--muted)">Select a symbol above to view its log.</span>
+        </div>
+      </div>
+
+    </div><!-- tab-content -->
+  </div><!-- panel-right -->
+</div><!-- main -->
+
+<div id="toast"></div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+const S = {
+  results:    {},   // sym → result
+  pending:    [],   // symbols queued to run
+  currentSym: null,
+  running:    false,
+  logLines:   [],
+  logRaw:     [],
+  tqdmFields: {},   // field → {status, value, label}
+  liveLines:  [],   // live log buffer (last 200 lines)
+};
+
+const KEY_FIELDS = [
+  "revenue","pat","eps_basic","eps_diluted","other_income","total_income",
+  "interest_expended","employee_cost","operating_expenses_bank","operating_profit_bank",
+  "provisions_bank","profit_before_tax","tax","pat_minority",
+  "npa_gross_cr","npa_net_cr","npa_pct_gross","npa_pct_net","car",
+  "equity_capital","reserves_surplus","deposits_bank","borrowings_current"
+];
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+let ws;
+function connectWS() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+
+  ws.onopen = () => {
+    document.getElementById('ws-status').textContent = '● connected';
+    document.getElementById('ws-status').style.color = 'var(--green)';
+  };
+  ws.onclose = () => {
+    document.getElementById('ws-status').textContent = '○ reconnecting...';
+    document.getElementById('ws-status').style.color = 'var(--muted)';
+    setTimeout(connectWS, 2000);
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+
+    if (msg.type === 'state') {
+      S.results = msg.results || {};
+      setRunning(msg.running);
+      updateProgress(msg.progress, msg.total, msg.current);
+      renderAll();
+    }
+    else if (msg.type === 'progress') {
+      updateProgress(msg.progress, msg.total, msg.current);
+      // Reset tqdm for new symbol
+      if (msg.current !== S.currentSym) {
+        S.tqdmFields = {};
+        document.getElementById('tqdm-sym').textContent = msg.current || '—';
+        renderTqdm(msg.current);
+      }
+    }
+    else if (msg.type === 'log') {
+      // Live log line — also parse for tqdm updates
+      const line = msg.line;
+      pushLiveLog(line);
+      parseTqdmLine(line, msg.symbol);
+      if (S.currentSym === msg.symbol) {
+        appendInspectorLog(line);
+      }
+    }
+    else if (msg.type === 'result') {
+      S.results[msg.symbol] = msg.result;
+      renderSymList();
+      renderStats();
+      renderOverviewTable();
+      renderGrid();
+      refreshScores();
+      if (S.currentSym === msg.symbol) renderInspector(msg.symbol);
+      refreshLogList();
+    }
+    else if (msg.type === 'done') {
+      setRunning(false);
+      updateProgress(msg.total, msg.total, '');
+      document.getElementById('live-panel').style.display = 'none';
+      toast('Verification complete ✓');
+      renderAll();
+    }
+  };
+}
+
+// ── tqdm ───────────────────────────────────────────────────────────────────
+function parseTqdmLine(line, sym) {
+  // Parse lines like:
+  //   [ 1/23] [CACHE]   revenue    = 81546.2
+  //   [ 2/23] [MISTRAL→] pat       asking...
+  //   [ 2/23] [MISTRAL←] pat       = 17188.05  'Net profit...'
+  //   [ 2/23] [NULL]     car       Mistral returned null
+  //   [ 2/23] [HALLUCINATION] car  ...
+
+  const mIdx = line.match(/\[(\s*\d+)\/(\s*\d+)\]/);
+  if (!mIdx) return;
+  const i     = parseInt(mIdx[1]);
+  const total = parseInt(mIdx[2]);
+
+  // Update overall bar
+  document.getElementById('tqdm-overall-fill').style.width = `${i/total*100}%`;
+  document.getElementById('tqdm-overall-label').textContent = `${i} / ${total}`;
+
+  // Parse field + status
+  let field = null, status = 'pending', value = null, label = '';
+
+  const mCache = line.match(/\[CACHE\]\s+(\S+)\s+=\s+(.+)/);
+  if (mCache) { field=mCache[1]; status='cache'; value=mCache[2].trim(); }
+
+  const mAsk = line.match(/\[MISTRAL→\]\s+(\S+)/);
+  if (mAsk) { field=mAsk[1]; status='asking'; }
+
+  const mGot = line.match(/\[MISTRAL←\]\s+(\S+)\s+=\s+([\d\.\-]+)\s+'([^']*)'/);
+  if (mGot) { field=mGot[1]; status='mistral'; value=mGot[2]; label=mGot[3]; }
+
+  const mNull = line.match(/\[NULL\]\s+(\S+)/);
+  if (mNull) { field=mNull[1]; status='null'; }
+
+  const mHall = line.match(/\[HALLUCINATION\]\s+(\S+)/);
+  if (mHall) { field=mHall[1]; status='hallucination'; }
+
+  const mFail = line.match(/\[FAIL\]\s+(\S+)/);
+  if (mFail) { field=mFail[1]; status='fail'; }
+
+  if (field) {
+    S.tqdmFields[field] = {status, value, label, i, total};
+    renderTqdm(sym);
+  }
+}
+
+function renderTqdm(sym) {
+  document.getElementById('tqdm-sym').textContent = sym || '—';
+  const fields = KEY_FIELDS;
+  let html = '';
+  fields.forEach(field => {
+    const info   = S.tqdmFields[field];
+    const status = info?.status || 'pending';
+    const val    = info?.value  || '';
+    const lbl    = (info?.label || '').slice(0,35);
+
+    let fillColor = 'var(--muted)';
+    let fillPct   = 0;
+    let srcLabel  = '·';
+    let srcCls    = 'pending';
+
+    if (status === 'cache') {
+      fillColor = 'var(--green)'; fillPct = 100; srcLabel = 'cache'; srcCls = 'cache';
+    } else if (status === 'asking') {
+      fillColor = 'var(--purple)'; fillPct = 50; srcLabel = '...'; srcCls = 'mistral';
+    } else if (status === 'mistral') {
+      fillColor = 'var(--blue)'; fillPct = 100; srcLabel = 'mistral'; srcCls = 'mistral';
+    } else if (status === 'null' || status === 'fail' || status === 'hallucination') {
+      fillColor = 'var(--red)'; fillPct = 100; srcLabel = status; srcCls = 'fail';
+    }
+
+    html += `<div class="tqdm-bar-row">
+      <div class="tqdm-field">${field}</div>
+      <div class="tqdm-track">
+        <div class="tqdm-fill" style="width:${fillPct}%;background:${fillColor}"></div>
+      </div>
+      <div class="tqdm-val">${val ? parseFloat(val).toLocaleString(undefined,{maximumFractionDigits:2}) : ''}</div>
+      <div class="tqdm-src ${srcCls}">${srcLabel}</div>
+    </div>`;
+  });
+  document.getElementById('tqdm-fields').innerHTML = html;
+}
+
+// ── Live log ───────────────────────────────────────────────────────────────
+function pushLiveLog(line) {
+  S.liveLines.push(line);
+  if (S.liveLines.length > 200) S.liveLines.shift();
+
+  const box  = document.getElementById('live-log');
+  const safe = line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  let cls = '';
+  if (/\[ERROR\]|✗|FAIL/.test(line))        cls = 'log-err';
+  else if (/\[WARN\]|⚠|HALLUCINATION/.test(line)) cls = 'log-warn';
+  else if (/✓|\[DONE\]|\[RESULT\]|MISTRAL←/.test(line)) cls = 'log-ok';
+  else if (/MISTRAL→|→\]/.test(line))        cls = 'log-info';
+  else if (/\[CACHE\]/.test(line))           cls = 'log-dim';
+
+  const div = document.createElement('div');
+  div.className = cls;
+  div.textContent = line;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function appendInspectorLog(line) {
+  const box = document.getElementById('inspector-log');
+  if (!box) return;
+  const safe = line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  let cls = '';
+  if (/FAIL|ERROR/.test(line)) cls = 'log-err';
+  else if (/WARN|⚠/.test(line)) cls = 'log-warn';
+  else if (/✓|DONE|RESULT|MISTRAL←/.test(line)) cls = 'log-ok';
+  else if (/MISTRAL→/.test(line)) cls = 'log-info';
+  else if (/CACHE/.test(line)) cls = 'log-dim';
+  const div = document.createElement('div');
+  div.className = cls;
+  div.textContent = line;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+// ── Symbol grid ────────────────────────────────────────────────────────────
+function renderGrid() {
+  const grid = document.getElementById('sym-grid');
+  const hdr  = document.getElementById('grid-hdr');
+
+  const rs = Object.values(S.results);
+  if (!rs.length && !S.running) {
+    grid.innerHTML = ''; hdr.style.display = 'none'; return;
+  }
+  hdr.style.display = '';
+
+  const filters = {
+    good:    document.getElementById('filt-good')?.checked,
+    warn:    document.getElementById('filt-warn')?.checked,
+    fail:    document.getElementById('filt-fail')?.checked,
+    new:     document.getElementById('filt-new')?.checked,
+    nopdf:   document.getElementById('filt-nopdf')?.checked,
+    pending: document.getElementById('filt-pending')?.checked,
+  };
+
+  const cur = S.currentRunSym;
+
+  // Build sym set — running sym first
+  const allSyms = [...new Set([
+    ...(S.pending||[]),
+    ...rs.map(r=>r.symbol),
+  ])];
+
+  let html = '';
+  allSyms.forEach(sym => {
+    const r  = S.results[sym];
+    const st = r?.status || (sym === cur ? 'running' : 'pending');
+    const sc = r?.score || 0;
+
+    const clsMap = {GOOD:'good',WARN:'warn',FAIL:'fail',NEW:'new',
+                    NO_PDF:'nopdf',NO_XBRL:'nopdf',ERROR:'error',
+                    running:'running',pending:'pending'};
+    const cls = clsMap[st] || 'pending';
+
+    // Filter
+    if (st==='GOOD'    && !filters.good)    return;
+    if (st==='WARN'    && !filters.warn)    return;
+    if (st==='FAIL'    && !filters.fail)    return;
+    if (st==='NEW'     && !filters.new)     return;
+    if (st==='NO_PDF'  && !filters.nopdf)   return;
+    if (st==='pending' && !filters.pending) return;
+
+    const tip = r ? `${st} score=${sc}` : st;
+    html += `<div class="sym-cell ${cls}" onclick="selectSym('${sym}')" title="${tip}">
+      ${sym}${sc ? ' '+sc : ''}
+    </div>`;
+  });
+
+  grid.innerHTML = html || '';
+
+  // Show/hide overview table
+  const hasDone = rs.length > 0;
+  document.getElementById('overview-empty').style.display  = (!hasDone && !S.running) ? 'flex' : 'none';
+  document.getElementById('overview-table').style.display  = hasDone ? '' : 'none';
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+async function init() {
+  // Load universe for dropdown
+  const univ = await fetch('/api/universe').then(r => r.json());
+  const sel  = document.getElementById('sel-sym');
+  sel.innerHTML = '';
+  univ.forEach(u => {
+    const opt = document.createElement('option');
+    opt.value = u.symbol;
+    opt.textContent = u.symbol + (u.has_pdf ? '' : ' ✗');
+    sel.appendChild(opt);
+  });
+
+  // Load existing state
+  const state = await fetch('/api/state').then(r => r.json());
+  S.results = state.results || {};
+  setRunning(state.running);
+  updateProgress(state.progress, state.total, state.current);
+  renderAll();
+  refreshLogList();
+
+  connectWS();
+
+  // Mode change
+  document.getElementById('sel-mode').onchange = function() {
+    document.getElementById('sel-sym').style.display =
+      this.value === 'single' ? 'block' : 'none';
+  };
+}
+
+async function startRun() {
+  const mode  = document.getElementById('sel-mode').value;
+  const sym   = document.getElementById('sel-sym').value;
+  const force = document.getElementById('chk-force').checked;
+
+  // Clear live log
+  document.getElementById('live-log').innerHTML = '';
+  S.liveLines = [];
+  S.tqdmFields = {};
+
+  const r = await fetch('/api/run', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({mode, symbol:sym, force})
+  });
+  const data = await r.json();
+  if (data.error) { toast('Error: ' + data.error, true); return; }
+  setRunning(true);
+  updateProgress(0, data.total, '');
+  document.getElementById('live-panel').style.display = '';
+}
+
+async function stopRun() {
+  await fetch('/api/stop', {method:'POST'});
+  setRunning(false);
+  document.getElementById('live-panel').style.display = 'none';
+  toast('Stopped');
+}
+
+function clearResults() {
+  S.results = {};
+  S.currentSym = null;
+  S.liveLines  = [];
+  S.tqdmFields = {};
+  renderAll();
+  renderGrid();
+  document.getElementById('inspector-content').style.display = 'none';
+  document.getElementById('inspector-empty').style.display   = 'flex';
+  document.getElementById('live-log').innerHTML = '';
+  document.getElementById('live-panel').style.display = 'none';
+}
+
+function setRunning(running) {
+  S.running = running;
+  document.getElementById('btn-run').disabled = running;
+  document.getElementById('btn-stop').style.display = running ? '' : 'none';
+  document.getElementById('btn-run').style.display  = running ? 'none' : '';
+  const hs = document.getElementById('hdr-status');
+  hs.textContent = running ? '● running' : 'ready';
+  hs.className   = 'hdr-status' + (running ? ' running' : '');
+  if (!running) document.getElementById('live-panel').style.display = 'none';
+}
+
+function updateProgress(prog, total, current) {
+  const pct = total ? prog / total * 100 : 0;
+  document.getElementById('prog-fill').style.width = pct + '%';
+  document.getElementById('prog-label').textContent =
+    total ? `${prog}/${total}${current ? ' — ' + current : ''}` : '';
+}
+
+// ── Render all ─────────────────────────────────────────────────────────────
+function renderAll() {
+  renderStats();
+  renderSymList();
+  renderGrid();
+  renderOverviewTable();
+  refreshScores();
+}
+
+function statusBadge(s) {
+  const cls = {GOOD:'good',WARN:'warn',FAIL:'fail',NEW:'new',
+                NO_PDF:'nopdf',NO_XBRL:'nopdf',ERROR:'error',RUNNING:'run'}[s]||'nopdf';
+  return `<span class="badge badge-${cls}">${s}</span>`;
+}
+
+function scoreColor(sc) {
+  return sc >= 85 ? 'var(--green)' : sc >= 60 ? 'var(--yellow)' : 'var(--red)';
+}
+
+// ── Stats bar ──────────────────────────────────────────────────────────────
+function renderStats() {
+  const rs = Object.values(S.results);
+  const counts = {};
+  rs.forEach(r => counts[r.status] = (counts[r.status]||0)+1);
+  document.getElementById('stat-total').textContent = rs.length;
+  document.getElementById('stat-good').textContent  = counts.GOOD||0;
+  document.getElementById('stat-warn').textContent  = counts.WARN||0;
+  document.getElementById('stat-fail').textContent  = counts.FAIL||0;
+  document.getElementById('stat-new').textContent   = counts.NEW||0;
+}
+
+// ── Symbol list ────────────────────────────────────────────────────────────
+function renderSymList() {
+  const rs = Object.values(S.results);
+  if (!rs.length && !S.running) {
+    document.getElementById('sym-list').innerHTML =
+      '<div class="empty"><span class="empty-icon">◎</span>Run verification</div>';
+    document.getElementById('sym-count').textContent = '0';
+    return;
+  }
+
+  const sortOrd = {FAIL:0,ERROR:1,WARN:2,NEW:3,GOOD:4,NO_PDF:5,NO_XBRL:6,UNKNOWN:7};
+  const sorted  = rs.slice().sort((a,b) => (sortOrd[a.status]||9)-(sortOrd[b.status]||9));
+  document.getElementById('sym-count').textContent = rs.length;
+
+  // Add running symbol placeholder if not in results
+  const cur = document.querySelector('.sym-name.running-sym');
+
+  let html = '';
+  sorted.forEach(r => {
+    const sc    = r.score || 0;
+    const active= r.symbol === S.currentSym ? ' active' : '';
+    html += `
+      <div class="sym-row${active}" onclick="selectSym('${r.symbol}')">
+        <div>
+          <div class="sym-name">${r.symbol}</div>
+          <div class="sym-ql">${r.pdf_latest||'—'}</div>
+        </div>
+        <div>${statusBadge(r.status)}</div>
+        <div class="sym-score" style="color:${scoreColor(sc)}">${sc||'—'}</div>
+      </div>`;
+  });
+  document.getElementById('sym-list').innerHTML = html || '<div class="empty"><span class="empty-icon">◎</span>Run verification</div>';
+}
+
+// ── Overview table ─────────────────────────────────────────────────────────
+function renderOverviewTable() {
+  const rs = Object.values(S.results);
+  const tbl = document.getElementById('overview-table');
+  const emp = document.getElementById('overview-empty');
+  if (!rs.length) { tbl.style.display='none'; emp.style.display='flex'; return; }
+  tbl.style.display=''; emp.style.display='none';
+
+  const sortOrd = {FAIL:0,ERROR:1,WARN:2,NEW:3,GOOD:4,NO_PDF:5,NO_XBRL:6};
+  const sorted  = rs.slice().sort((a,b)=>(sortOrd[a.status]||9)-(sortOrd[b.status]||9));
+
+  const tbody = document.getElementById('overview-tbody');
+  tbody.innerHTML = sorted.map(r => {
+    const sc = r.score||0;
+    const ni = (r.issues||[]).length;
+    return `<tr onclick="selectSym('${r.symbol}')" style="cursor:pointer">
+      <td class="field-name" style="color:var(--blue2);font-weight:600">${r.symbol}</td>
+      <td style="color:var(--dim)">${r.xbrl_latest||'—'}</td>
+      <td style="color:var(--dim)">${r.pdf_latest||'—'}</td>
+      <td>${statusBadge(r.status)}</td>
+      <td style="text-align:right;color:${scoreColor(sc)};font-weight:700">${sc||'—'}</td>
+      <td style="color:${ni?'var(--red)':'var(--muted)'}">${ni?'⚠ '+ni:'—'}</td>
+      <td><button class="btn btn-ghost" style="padding:2px 8px;font-size:10px"
+          onclick="event.stopPropagation();selectSym('${r.symbol}');switchTab('inspector')">
+          inspect →</button></td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Score analysis ─────────────────────────────────────────────────────────
+function refreshScores() {
+  const verified = Object.values(S.results).filter(r =>
+    ['GOOD','WARN','FAIL'].includes(r.status) && r.score > 0);
+
+  const emp = document.getElementById('scores-empty');
+  const con = document.getElementById('scores-content');
+  if (!verified.length) { emp.style.display='flex'; con.style.display='none'; return; }
+  emp.style.display='none'; con.style.display='';
+
+  const scores = verified.map(r => r.score);
+  const avg    = scores.reduce((a,b)=>a+b,0)/scores.length;
+  const med    = scores.slice().sort((a,b)=>a-b)[Math.floor(scores.length/2)];
+  document.getElementById('sc-avg').textContent = avg.toFixed(0);
+  document.getElementById('sc-med').textContent = med;
+  document.getElementById('sc-n').textContent   = verified.length;
+
+  // Distribution
+  let distHtml = '';
+  for (let i=0; i<=90; i+=10) {
+    const n     = scores.filter(s => s>=i && s<i+10).length;
+    const color = i>=85 ? 'var(--green)' : i>=60 ? 'var(--yellow)' : 'var(--red)';
+    const w     = verified.length ? Math.max(4, n/verified.length*100) : 0;
+    distHtml += `<div class="score-bar-row">
+      <div class="score-bar-label">${i}–${i+9}</div>
+      <div class="score-bar-track">
+        <div class="score-bar-fill" style="width:${w}%;background:${color}"></div>
+      </div>
+      <div class="score-bar-n">${n}</div>
+    </div>`;
+  }
+  document.getElementById('score-dist').innerHTML = distHtml;
+
+  // Field hit rate
+  let hitHtml = '';
+  KEY_FIELDS.forEach(field => {
+    const nHit = verified.filter(r => r.fields && r.fields[field] != null).length;
+    const rate = verified.length ? nHit/verified.length : 0;
+    const color= rate>=0.8?'var(--green)':rate>=0.5?'var(--yellow)':'var(--red)';
+    hitHtml += `<div class="hit-row">
+      <div class="hit-label">${field}</div>
+      <div class="hit-track">
+        <div class="hit-fill" style="width:${rate*100}%;background:${color}"></div>
+      </div>
+      <div class="hit-pct" style="color:${color}">${(rate*100).toFixed(0)}%</div>
+    </div>`;
+  });
+  document.getElementById('field-hits').innerHTML = hitHtml;
+
+  // Failure patterns
+  const failWarn = verified.filter(r => ['FAIL','WARN'].includes(r.status));
+  const issueCounts = {};
+  failWarn.forEach(r => (r.issues||[]).forEach(issue => {
+    const key = issue.includes('MATH') ? 'Math check failed'
+              : issue.includes('XBRL FAIL') ? 'XBRL mismatch: '+(issue.match(/\] (\w+):/)??[,'?'])[1]
+              : issue.includes('HALLUCINATION') ? 'Hallucination detected'
+              : issue.slice(0,50);
+    issueCounts[key] = (issueCounts[key]||0)+1;
+  }));
+  const sorted = Object.entries(issueCounts).sort((a,b)=>b[1]-a[1]);
+  document.getElementById('fail-patterns').innerHTML = sorted.length
+    ? sorted.map(([k,n]) =>
+        `<div style="display:flex;gap:12px;padding:4px 0;font-size:11px">
+          <span style="color:var(--red);min-width:28px;text-align:right">${n}×</span>
+          <span style="color:var(--dim)">${k}</span></div>`
+      ).join('')
+    : '<div style="color:var(--muted)">No failures</div>';
+}
+
+// ── Inspector ──────────────────────────────────────────────────────────────
+function selectSym(sym) {
+  S.currentSym = sym;
+  // Update active row
+  document.querySelectorAll('.sym-row').forEach(el => el.classList.remove('active'));
+  const rows = document.querySelectorAll('.sym-row');
+  rows.forEach(el => {
+    if (el.querySelector('.sym-name')?.textContent === sym) el.classList.add('active');
+  });
+  renderInspector(sym);
+  switchTab('inspector');
+  loadLogForSym(sym);
+}
+
+function renderInspector(sym) {
+  const r = S.results[sym];
+  if (!r) return;
+
+  document.getElementById('inspector-empty').style.display   = 'none';
+  document.getElementById('inspector-content').style.display = '';
+
+  const fields   = r.fields   || {};
+  const labels   = r.labels   || {};
+  const math     = r.math     || [];
+  const issues   = r.issues   || [];
+  const sc       = r.score || 0;
+
+  let html = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+      <span style="font-size:20px;font-weight:800;color:var(--blue2)">${sym}</span>
+      ${statusBadge(r.status)}
+      <span style="font-size:10px;color:var(--muted)">
+        score=${sc} | XBRL:${r.xbrl_latest||'—'} → PDF:${r.pdf_latest||'—'}
+        ${r.is_new ? '  🆕 NEW QUARTER' : ''}
+      </span>
+    </div>`;
+
+  // Math checks
+  if (math.length) {
+    html += `<div class="sec-hdr">MATH CHECKS</div>`;
+    math.forEach(mc => {
+      const s = mc.status==='PASS'?'✓':mc.status==='WARN'?'⚠':'✗';
+      const c = mc.status==='PASS'?'var(--green)':mc.status==='WARN'?'var(--yellow)':'var(--red)';
+      html += `<div class="math-row">
+        <span style="color:${c};font-weight:700;min-width:14px">${s}</span>
+        <span style="color:var(--dim);width:160px;font-family:monospace">${mc.field}</span>
+        <span style="color:var(--muted)">exp=${mc.expected?.toFixed(2)}</span>
+        <span style="color:var(--muted)">got=${mc.got?.toFixed(2)}</span>
+        <span style="color:${c}">(${mc.diff_pct?.toFixed(1)}%)</span>
+      </div>`;
+    });
+  }
+
+  // Field table
+  const hasFields = Object.keys(fields).length > 0;
+  if (hasFields) {
+    html += `<div class="sec-hdr" style="margin-top:14px">FIELD VALUES</div>
+    <table class="ftable">
+      <thead><tr>
+        <th>FIELD</th><th style="text-align:right">PDF VALUE</th>
+        <th style="text-align:right">XBRL VALUE</th>
+        <th style="text-align:center">MATCH</th><th>LABEL USED</th>
+      </tr></thead><tbody>`;
+
+    KEY_FIELDS.forEach(field => {
+      const pv = fields[field];
+      if (pv == null) return;
+      const lbl = (labels[field]||'').slice(0,45);
+      // We don't have xbrl_ref here, show from result if available
+      html += `<tr>
+        <td class="field-name">${field}</td>
+        <td class="field-val">${pv.toLocaleString(undefined,{maximumFractionDigits:4})}</td>
+        <td class="field-xbrl">—</td>
+        <td class="field-match">—</td>
+        <td class="field-label">${lbl}</td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+  }
+
+  // Issues
+  if (issues.length) {
+    html += `<div class="sec-hdr" style="margin-top:14px">ISSUES</div>`;
+    issues.forEach(issue => {
+      const c = issue.includes('FAIL') ? 'var(--red)' : 'var(--yellow)';
+      html += `<div style="font-size:11px;color:${c};padding:3px 0">! ${issue}</div>`;
+    });
+  }
+
+  // Inline log
+  html += `<div class="sec-hdr" style="margin-top:14px">EXECUTION LOG</div>
+    <div class="logbox" id="inspector-log" style="max-height:300px;overflow-y:auto">
+      <span style="color:var(--muted)">Loading log...</span>
+    </div>`;
+
+  document.getElementById('inspector-content').innerHTML = html;
+  loadLogForSym(sym, 'inspector-log');
+}
+
+// ── Logs tab ───────────────────────────────────────────────────────────────
+async function refreshLogList() {
+  const syms = await fetch('/api/logs').then(r=>r.json());
+  const sel  = document.getElementById('log-sym-sel');
+  const prev = sel.value;
+  sel.innerHTML = '<option>— select symbol —</option>';
+  syms.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s; opt.textContent = s;
+    if (s===prev) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+async function loadLog() {
+  const sym = document.getElementById('log-sym-sel').value;
+  if (!sym || sym.startsWith('—')) return;
+  await loadLogForSym(sym, 'log-box');
+}
+
+async function loadLogForSym(sym, boxId='log-box') {
+  const data = await fetch(`/api/log/${sym}`).then(r=>r.json());
+  S.logRaw   = data.lines || [];
+  renderLogBox(S.logRaw, boxId);
+  // Also update log-sym-sel
+  const sel = document.getElementById('log-sym-sel');
+  for (let i=0;i<sel.options.length;i++)
+    if (sel.options[i].value===sym) { sel.selectedIndex=i; break; }
+}
+
+function renderLogBox(lines, boxId='log-box') {
+  const box = document.getElementById(boxId);
+  if (!box) return;
+  box.innerHTML = lines.map(line => {
+    const safe = line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    let cls = '';
+    if (/\[ERROR\]|✗|FAIL/.test(line))    cls = 'log-err';
+    else if (/\[WARN\]|⚠|ISSUE/.test(line)) cls = 'log-warn';
+    else if (/✓|\[DONE\]|\[RESULT\]/.test(line)) cls = 'log-ok';
+    else if (/\[MISTRAL\]|\[VISION\]|\[XBRL\]|\[PDF\]|\[MATH\]|\[MODE\]/.test(line)) cls = 'log-info';
+    else if (/\[CACHE\]|\[INFO\]/.test(line)) cls = 'log-dim';
+    return cls ? `<div class="${cls}">${safe}</div>` : `<div>${safe}</div>`;
+  }).join('') || '<span style="color:var(--muted)">Empty log</span>';
+  box.scrollTop = box.scrollHeight;
+}
+
+function filterLogs() {
+  const q = document.getElementById('log-search').value.toLowerCase();
+  const filtered = q ? S.logRaw.filter(l => l.toLowerCase().includes(q)) : S.logRaw;
+  renderLogBox(filtered);
+}
+
+function downloadLog() {
+  const sym = document.getElementById('log-sym-sel').value;
+  if (!sym || sym.startsWith('—')) return;
+  window.open(`/api/log/${sym}?download=1`);
+}
+
+// ── Tab switching ──────────────────────────────────────────────────────────
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(el =>
+    el.classList.toggle('active', el.dataset.tab===tab));
+  document.querySelectorAll('.tab-pane').forEach(el =>
+    el.classList.toggle('active', el.id==='tab-'+tab));
+}
+
+// ── Toast ──────────────────────────────────────────────────────────────────
+function toast(msg, isErr=false) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.borderColor = isErr ? 'var(--red)' : 'var(--border)';
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+// ── Start ──────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>
