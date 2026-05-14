@@ -45,7 +45,12 @@ logging.basicConfig(
 )
 
 MISTRAL_MODEL    = "mistral-small-latest"
-RATE_LIMIT_DELAY = 1.5   # seconds between Mistral calls
+RATE_LIMIT_DELAY = 1.8   # minimum seconds between Mistral calls
+
+# Global lock — enforced across threads when server runs multiple symbols
+import threading as _threading
+_mistral_lock      = _threading.Lock()
+_mistral_last_call = 0.0
 
 # ── Fields + questions ────────────────────────────────────────────────────────
 # (question_to_mistral, is_ratio)
@@ -53,11 +58,12 @@ RATE_LIMIT_DELAY = 1.5   # seconds between Mistral calls
 
 FIELDS = {
     "revenue": (
-        "What is the Interest earned (a)+(b)+(c)+(d) value? "
-        "This is the FIRST major line in the P&L — the total interest income line. "
-        "It is NOT 'Total income (1)+(2)' which includes other income too. "
-        "For non-banks look for 'Revenue from operations' or 'Net sales'. "
-        "Give the consolidated current quarter value in Crores.",
+        "What is the total revenue from operations? "
+        "For banks: look for 'Interest earned (a)+(b)+(c)+(d)' — the TOTAL line not sub-items. "
+        "For non-banks / NBFCs: look for 'Revenue from operations', 'Total Revenue from operations', "
+        "'(I) Total Revenue from operations', 'Net revenue', or 'Income from operations'. "
+        "Use CONSOLIDATED figures. Return current quarter value only. Do NOT return 'Total income' "
+        "which includes other income — only the revenue from operations line.",
         False,
     ),
     "other_income": (
@@ -67,52 +73,68 @@ FIELDS = {
         False,
     ),
     "total_income": (
-        "What is the total income? "
-        "'Total income (1)+(2)' = interest earned + other income. "
-        "Consolidated current quarter, Crores.",
+        "What is the total income including other income? "
+        "For banks: 'Total income (1)+(2)'. "
+        "For non-banks: '(iii) Total income (I+II)', 'Total revenues', or 'Total income'. "
+        "Consolidated, current quarter.",
         False,
     ),
     "interest_expended": (
-        "What is the total interest expended? "
-        "'Interest expended' TOTAL line. Consolidated current quarter, Crores.",
+        "What is the total interest expended or finance costs? "
+        "For banks: 'Interest expended' TOTAL. "
+        "For non-banks: 'Finance Costs', '(i) Finance Costs'. "
+        "Consolidated, current quarter.",
         False,
     ),
     "employee_cost": (
         "What is the employee cost or staff expenses? "
-        "Look for 'i) Employees cost' — a sub-item of operating expenses. "
-        "Consolidated current quarter, Crores.",
+        "For banks: 'i) Employees cost'. "
+        "For non-banks: 'Employee Benefits Expenses', '(v) Employee Benefits Expenses'. "
+        "Consolidated, current quarter.",
         False,
     ),
     "operating_expenses_bank": (
         "What are the total operating expenses? "
-        "'Operating expenses (i)+(ii)+(iii)' TOTAL. Consolidated, Crores.",
+        "For banks: 'Operating expenses (i)+(ii)+(iii)' TOTAL. "
+        "For non-banks: '(IV) Total Expenses', 'Total Expenses'. "
+        "Consolidated, current quarter.",
         False,
     ),
     "operating_profit_bank": (
-        "What is the operating profit before provisions? "
-        "'Operating profit before provisions and contingencies'. Consolidated, Crores.",
+        "What is the operating profit before provisions and tax? "
+        "For banks: 'Operating profit before provisions and contingencies'. "
+        "For non-banks: 'Operating Profit Before Tax', 'Profit before Exceptional Item and tax', "
+        "'(V) Profit before Exceptional Item and tax'. "
+        "Consolidated, current quarter.",
         False,
     ),
     "provisions_bank": (
         "What are the provisions and contingencies? "
-        "'Provisions (other than tax) and contingencies'. Consolidated, Crores.",
+        "For banks: 'Provisions (other than tax) and contingencies'. "
+        "For non-banks this field may not exist — return null if not found. "
+        "Consolidated, current quarter.",
         False,
     ),
     "profit_before_tax": (
         "What is the profit before tax? "
-        "'Profit from ordinary activities before tax and minority interest'. Consolidated, Crores.",
+        "For banks: 'Profit from ordinary activities before tax and minority interest'. "
+        "For non-banks: '(VI) Profit before tax', 'Profit before tax', 'PBT'. "
+        "Consolidated, current quarter.",
         False,
     ),
     "tax": (
         "What is the total tax expense? "
-        "'Tax expense (Refer note...)'. Consolidated, Crores.",
+        "For banks: 'Tax expense (Refer note...)'. "
+        "For non-banks: 'Total Tax Expense', '(VII) Tax expense'. "
+        "Consolidated, current quarter.",
         False,
     ),
     "pat": (
-        "What is the net profit BEFORE deducting minority interest? "
-        "For banks: 'Net profit from ordinary activities after tax and before minority interest'. "
-        "This is the row BEFORE the minority deduction. NOT (14)-(15). "
-        "Consolidated current quarter, Crores.",
+        "What is the net profit after tax? "
+        "For banks: 'Net profit from ordinary activities after tax and before minority interest' — BEFORE minority deduction. "
+        "For non-banks / NBFCs: 'Profit for the period/year', '(VIII) Profit for the period/year (VI-VII)', "
+        "'Profit after tax', or 'PAT'. "
+        "Use CONSOLIDATED figures. Current quarter only.",
         False,
     ),
     "pat_minority": (
@@ -195,19 +217,21 @@ VERIFY_THRESHOLD = 0.05   # 5% diff = WARN, >10% = FAIL
 
 # ── Cache helpers ──────────────────────────────────────────────────────────────
 
-def _cache_path(symbol: str) -> Path:
-    p = Path(CONFIG.storage.raw_dir) / "filings" / symbol.upper() / "mistral_cache.json"
+def _cache_path(symbol: str, model: str = None) -> Path:
+    m    = model or MISTRAL_MODEL
+    slug = re.sub(r"[^\w\-]", "_", m)
+    p    = Path(CONFIG.storage.raw_dir)/"filings"/symbol.upper()/f"mistral_cache_{slug}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
-def _load_cache(symbol: str) -> dict:
-    p = _cache_path(symbol)
+def _load_cache(symbol: str, model: str = None) -> dict:
+    p = _cache_path(symbol, model)
     return json.load(open(p)) if p.exists() else {}
 
-def _save_cache(symbol: str, cache: dict):
-    with open(_cache_path(symbol), "w") as f:
+def _save_cache(symbol: str, cache: dict, model: str = None):
+    with open(_cache_path(symbol, model), "w") as f:
         json.dump(cache, f, indent=2)
-    log.info(f"  [CACHE] Saved → {_cache_path(symbol).name}")
+    log.info(f"  [CACHE] Saved → {_cache_path(symbol, model).name}")
 
 
 # ── Page data helpers ──────────────────────────────────────────────────────────
@@ -254,13 +278,14 @@ def _build_page_text(page_results: dict, col_idx: int = 0) -> tuple:
 
 # ── Mistral API call ───────────────────────────────────────────────────────────
 
-def _ask_mistral(page_text: str, field: str, question: str, is_ratio: bool) -> dict:
+def _ask_mistral(page_text: str, field: str, question: str, is_ratio: bool,
+                 max_retries: int = 4, model: str = None) -> dict:
     """
-    Ask Mistral one specific question about the financial data.
-    Returns {value, label, confidence} or {value: None, error: str}
+    Ask Mistral one specific question. Retries on 429 with exponential backoff.
+    """
+    global _mistral_last_call
+    _model = model or MISTRAL_MODEL
 
-    THIS IS THE ONLY EXPENSIVE CALL — cached immediately after.
-    """
     api_key = os.environ.get("MISTRAL_API_KEY")
     if not api_key:
         return {"value": None, "error": "MISTRAL_API_KEY not set"}
@@ -293,32 +318,53 @@ or if not found:
     try:
         from mistralai import Mistral
         client = Mistral(api_key=api_key)
+    except ImportError:
+        return {"value": None, "error": "pip install mistralai"}
 
-        log.info(f"  [MISTRAL] Calling for field: {field}")
-        t0   = time.time()
-        resp = client.chat.complete(
-            model    = MISTRAL_MODEL,
-            messages = [{"role": "user", "content": prompt}],
-        )
-        elapsed = time.time() - t0
-        text    = resp.choices[0].message.content or ""
-        log.info(f"  [MISTRAL] Response in {elapsed:.1f}s for {field}")
+    for attempt in range(max_retries):
+        # Global rate limit — enforced across ALL threads
+        with _mistral_lock:
+            gap = time.time() - _mistral_last_call
+            if gap < RATE_LIMIT_DELAY:
+                time.sleep(RATE_LIMIT_DELAY - gap)
+            _mistral_last_call = time.time()
 
-        m = re.search(r"\{[^{}]*\}", text, re.DOTALL)
-        if not m:
-            return {"value": None, "error": "no JSON in response", "raw": text[:200]}
+        try:
+            t0   = time.time()
+            resp = client.chat.complete(
+                model    = _model,
+                messages = [{"role": "user", "content": prompt}],
+            )
+            elapsed = time.time() - t0
+            text    = resp.choices[0].message.content or ""
+            log.info(f"  [MISTRAL] Response in {elapsed:.1f}s for {field} (attempt {attempt+1})")
 
-        parsed = json.loads(m.group(0))
-        val    = _clean_num(parsed.get("value"))
-        return {
-            "value":      val,
-            "label":      str(parsed.get("label") or ""),
-            "confidence": float(parsed.get("confidence") or 0.0),
-        }
+            m = re.search(r"\{[^{}]*\}", text, re.DOTALL)
+            if not m:
+                return {"value": None, "error": "no JSON in response", "raw": text[:200]}
 
-    except Exception as e:
-        log.error(f"  [MISTRAL] Error for {field}: {e}")
-        return {"value": None, "error": str(e)}
+            parsed = json.loads(m.group(0))
+            val    = _clean_num(parsed.get("value"))
+            return {
+                "value":      val,
+                "label":      str(parsed.get("label") or ""),
+                "confidence": float(parsed.get("confidence") or 0.0),
+            }
+
+        except Exception as e:
+            err_str = str(e)
+            is_429  = "429" in err_str or "rate_limit" in err_str.lower()
+
+            if is_429 and attempt < max_retries - 1:
+                wait = (2 ** attempt) * 5   # 5s, 10s, 20s, 40s
+                log.warning(f"  [429] {field} rate limited — waiting {wait}s before retry {attempt+2}/{max_retries}")
+                time.sleep(wait)
+                continue   # retry
+
+            log.error(f"  [MISTRAL] Error for {field} after {attempt+1} attempts: {e}")
+            return {"value": None, "error": err_str}
+
+    return {"value": None, "error": "max retries exceeded"}
 
 
 # ── Anti-hallucination check ───────────────────────────────────────────────────
@@ -461,7 +507,9 @@ def extract_pdf_fields(
     xbrl_row:      dict = None,
     force:         bool = False,
     verbose:       bool = True,
-    log_cb=None,          # callback(line: str) — called after every log event
+    log_cb                = None,
+    model:         str  = None,    # override MISTRAL_MODEL
+    unit_scale:    float = 1.0,    # 0.01 if PDF reports in Lakhs, 1.0 for Crores
 ) -> dict:
     """
     Extract all financial fields from a PDF using Mistral.
@@ -483,13 +531,18 @@ def extract_pdf_fields(
         print(f"{'='*60}")
 
     # ── Build page text (free, logged) ────────────────────────────────────────
-    n_pages   = sum(1 for p in page_results.values() if p.get("has_financial_table"))
-    _log(f"  [PDF] {symbol}/{pdf_stem} — {n_pages} pages with tables")
+    # Use model override if provided
+    _model = model or MISTRAL_MODEL
+    if _model != MISTRAL_MODEL:
+        _log(f"  [MODEL] Using {_model} (override)")
+
+    if unit_scale != 1.0:
+        _log(f"  [UNITS] unit_scale={unit_scale} — all Crore values will be multiplied by {unit_scale}")
     page_text, all_values = _build_page_text(page_results, col_idx=col_idx)
     _log(f"  [PDF] {len(all_values)} unique values extracted from pages")
 
     # ── Load cache ────────────────────────────────────────────────────────────
-    cache     = _load_cache(symbol)
+    cache     = _load_cache(symbol, _model)
     pdf_cache = cache.get(pdf_stem, {})
     fields    = {}
     labels    = {}
@@ -518,18 +571,26 @@ def extract_pdf_fields(
 
         # Call Mistral (expensive — cache result immediately)
         _log(f"{prefix} [MISTRAL→] {field:<28} asking...")
-        time.sleep(RATE_LIMIT_DELAY)
-        result = _ask_mistral(page_text, field, question, is_ratio)
+        result = _ask_mistral(page_text, field, question, is_ratio, model=_model)
         val    = result.get("value")
         error  = result.get("error")
+        is_429 = error and ("429" in error or "rate_limit" in error.lower())
 
-        if error:
+        if error and not is_429:
+            # Genuine error (not rate limit) — cache it so we don't retry forever
             _log(f"{prefix} [FAIL] {field}: {error}")
             n_failed += 1
             pdf_cache[field] = {"value": None, "label": None,
                                 "confidence": 0.0, "error": error}
             cache[pdf_stem] = pdf_cache
-            _save_cache(symbol, cache)
+            _save_cache(symbol, cache, _model)
+            continue
+
+        if is_429:
+            # Rate limit was already retried inside _ask_mistral — if still failing,
+            # skip this field entirely but DO NOT cache so it's retried next run
+            _log(f"{prefix} [SKIP] {field}: rate limit — will retry next run")
+            n_failed += 1
             continue
 
         # Anti-hallucination: value must exist in raw data
@@ -543,14 +604,18 @@ def extract_pdf_fields(
         conf = result.get("confidence", 0.0)
         pdf_cache[field] = {"value": val, "label": lbl, "confidence": conf}
         cache[pdf_stem]  = pdf_cache
-        _save_cache(symbol, cache)   # ← cache immediately after every Mistral call
+        _save_cache(symbol, cache, _model)   # ← cache immediately
 
         if val is not None:
+            # Apply unit scale (e.g. Lakhs → Crores)
+            if unit_scale != 1.0 and not is_ratio:
+                val = round(val * unit_scale, 4)
             fields[field]  = val
             labels[field]  = lbl
             sources[field] = "mistral"
             n_mistral += 1
-            _log(f"{prefix} [MISTRAL←] {field:<28} = {val}  '{lbl[:40]}'")
+            _log(f"{prefix} [MISTRAL←] {field:<28} = {val}  '{lbl[:40]}'"
+                 + (f"  [×{unit_scale}]" if unit_scale != 1.0 else ""))
         else:
             n_failed += 1
             _log(f"{prefix} [NULL]     {field:<28} Mistral returned null")

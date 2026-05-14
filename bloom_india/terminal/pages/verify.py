@@ -1,94 +1,107 @@
 """
-bloom_india/terminal/pages/verify.py
-=====================================
-PDF × XBRL Verification Dashboard — 4 tabs:
-  OVERVIEW      : run, stats bar, symbol grid
-  SCORE ANALYSIS: distribution, field hit rate, failure patterns
-  INSPECTOR     : per-symbol fields vs XBRL, math checks, issues
-  LOGS          : saved logs per symbol, searchable, downloadable
+bloom_india/terminal/verify_server.py
+=======================================
+FastAPI verification server — PDF × XBRL comparison.
+
+WebSocket streams live progress to the browser.
+Background tasks run independently of client connections.
+
+Run:
+    uvicorn bloom_india.terminal.verify_server:app --port 8502 --reload
+
+Or via helper:
+    python -m bloom_india.terminal.verify_server
 """
 
-import os, re, json
+import os, re, json, time, asyncio, threading, logging
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
-import pandas as pd
-import streamlit as st
+# ── Global Mistral rate limiter (shared across ALL threads) ───────────────────
+_mistral_lock       = threading.Lock()
+_mistral_last_call  = 0.0
+MISTRAL_MIN_GAP     = 1.8   # minimum seconds between ANY Mistral call
 
-st.set_page_config(page_title="bloom_india · Verify", layout="wide", page_icon="◈")
+# ── Deduplication: prevent same symbol running twice ──────────────────────────
+_running_syms: set  = set()
+_running_lock       = threading.Lock()
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap');
-*,*::before,*::after{box-sizing:border-box}
-html,body,[class*="css"]{font-family:'IBM Plex Mono',monospace;background:#020c14;color:#c9d8e8}
-.stApp{background:#020c14}
-.block-container{padding:1.2rem 1.8rem;max-width:100%}
-.vhdr{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid #0d2035;
-      padding-bottom:12px;margin-bottom:14px}
-.vhdr-t{font-size:19px;font-weight:800;color:#38bdf8;letter-spacing:-0.02em}
-.vhdr-s{font-size:9px;color:#1e3a52;letter-spacing:0.18em}
-.sbar{display:flex;gap:20px;padding:6px 0 12px;flex-wrap:wrap}
-.stat{text-align:center;min-width:52px}
-.sv{font-size:22px;font-weight:800;line-height:1}
-.sl{font-size:9px;color:#1e3a52;letter-spacing:0.1em;margin-top:2px}
-.badge{display:inline-block;padding:2px 7px;border-radius:2px;
-       font-size:10px;font-weight:700;letter-spacing:0.06em}
-.bg{background:#052e16;color:#22c55e;border:1px solid #166534}
-.bw{background:#1c1003;color:#f59e0b;border:1px solid #92400e}
-.bf{background:#2a0a0a;color:#ef4444;border:1px solid #991b1b}
-.bn{background:#0c1a2e;color:#38bdf8;border:1px solid #0369a1}
-.bp{background:#111;color:#475569;border:1px solid #1e293b}
-.be{background:#1a0010;color:#f472b6;border:1px solid #9d174d}
-.srow{display:grid;grid-template-columns:110px 100px 100px 70px 48px 1fr;
-      gap:6px;padding:5px 10px;border-bottom:1px solid #061525;font-size:11px;align-items:center}
-.srow:hover{background:#061525}
-.ftrow{display:grid;grid-template-columns:170px 118px 118px 80px 1fr;
-       gap:6px;padding:5px 10px;border-bottom:1px solid #061525;font-size:11px;align-items:center}
-.ftrow:hover{background:#061525}
-.logbox{background:#030f1a;border:1px solid #0d2035;border-radius:3px;
-        padding:10px 14px;font-size:10px;font-family:'IBM Plex Mono',monospace;
-        color:#475569;height:400px;overflow-y:auto;white-space:pre-wrap;line-height:1.7}
-.lok{color:#22c55e}.lwarn{color:#f59e0b}.lerr{color:#ef4444}
-.linfo{color:#38bdf8}.ldim{color:#1e3a52}
-.prog-wrap{background:#061525;border-radius:2px;height:3px;margin:4px 0}
-.prog-fill{background:#38bdf8;height:3px;border-radius:2px}
-.dvd{border:none;border-top:1px solid #0d2035;margin:10px 0}
-.stTabs [data-baseweb="tab-list"]{background:#020c14 !important;border-bottom:1px solid #0d2035;gap:0}
-.stTabs [data-baseweb="tab"]{font-family:'IBM Plex Mono',monospace !important;
-  font-size:11px !important;letter-spacing:0.1em !important;
-  color:#334155 !important;padding:8px 20px !important}
-.stTabs [aria-selected="true"]{color:#38bdf8 !important;border-bottom:2px solid #38bdf8 !important}
-.stTabs [data-baseweb="tab-panel"]{padding:14px 0 !important}
-.stButton>button{background:#38bdf8 !important;color:#020c14 !important;
-  font-family:'IBM Plex Mono',monospace !important;font-weight:800 !important;
-  font-size:11px !important;letter-spacing:0.08em !important;
-  border:none !important;border-radius:3px !important;padding:7px 18px !important}
-.stButton>button:hover{background:#7dd3fc !important}
-.stButton>button[disabled]{background:#061525 !important;color:#1e3a52 !important}
-.stSelectbox>div>div,.stTextInput>div>div>input{background:#061525 !important;
-  border:1px solid #0d2035 !important;font-family:'IBM Plex Mono',monospace !important;
-  font-size:11px !important;color:#94a3b8 !important}
-</style>
-""", unsafe_allow_html=True)
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
-# ── Setup ─────────────────────────────────────────────────────────────────────
 os.environ.setdefault(
     "BLOOM_INDIA_CONFIG",
-    str(Path(__file__).parents[3] / "config.yaml"),
+    str(Path(__file__).parents[2] / "config.yaml"),
 )
-try:
-    from bloom_india.config import CONFIG
-    from bloom_india.data.process.pdf_extract import extract_symbol
-    from bloom_india.data.process.pdf_mistral_extractor import extract_pdf_fields
-except Exception as e:
-    st.error(f"Import error: {e}"); st.stop()
+
+# Load API keys from environment — uvicorn doesn't inherit shell exports
+# Add your keys to a .env file at the repo root or set them here
+_env_file = Path(__file__).parents[2] / ".env"
+if _env_file.exists():
+    for line in open(_env_file).read().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
+
+from bloom_india.config import CONFIG
+from bloom_india.data.process.pdf_extract import extract_symbol
+from bloom_india.data.process.pdf_mistral_extractor import extract_pdf_fields, FIELDS
+
+import pandas as pd
+
+log = logging.getLogger("verify")
+
+# File handler so Jupyter can tail logs
+_log_file = Path(CONFIG.storage.base_dir) / "verify_server.log"
+_fh = logging.FileHandler(str(_log_file), mode="a")
+_fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+log.addHandler(_fh)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                    handlers=[logging.StreamHandler(), _fh])
+
+# ── App ────────────────────────────────────────────────────────────────────────
+app = FastAPI(title="bloom_india · Verify")
+
+# ── State ──────────────────────────────────────────────────────────────────────
+STATE = {
+    "running":  False,
+    "progress": 0,
+    "total":    0,
+    "current":  "",
+    "results":  {},   # sym → result dict
+    "logs":     {},   # sym → list[str]  (in-memory, also saved to disk)
+}
 
 LOG_DIR = Path(CONFIG.storage.base_dir) / "verify_logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-for k, v in [("results",{}),("running",False),("progress",0),("total",0),("sel_sym",None)]:
-    if k not in st.session_state: st.session_state[k] = v
+# WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self._connections: list[WebSocket] = []
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self._connections.append(ws)
+
+    def disconnect(self, ws: WebSocket):
+        if ws in self._connections:
+            self._connections.remove(ws)
+
+    async def broadcast(self, msg: dict):
+        dead = []
+        for ws in self._connections:
+            try:
+                await ws.send_json(msg)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(ws)
+
+manager = ConnectionManager()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _qkey(ql):
@@ -99,62 +112,72 @@ def _latest_xbrl(db, sym):
     rows = db[db["symbol"]==sym]["quarter_label"].dropna().unique().tolist()
     return max(rows, key=_qkey) if rows else ""
 
-def _latest_pdf(sym):
+def _latest_pdf(sym, db=None):
+    """
+    Find best PDF for verification:
+    - If db provided: prefer latest PDF whose quarter exists in XBRL (best for verify)
+    - Fallback: absolute latest PDF (NEW DATA mode)
+    """
     d = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()
     if not d.exists(): return None, None
     pdfs = list(d.glob("*.pdf"))
     if not pdfs: return None, None
-    def key(p):
+
+    def _key(p):
         m = re.search(r"(Q[1-4])_FY(\d{4})", p.stem)
         return _qkey(f"{m.group(1)}_FY{m.group(2)}") if m else 0
-    p = max(pdfs, key=key)
-    m = re.search(r"(Q[1-4])_FY(\d{4})", p.stem)
-    return p.stem, (f"{m.group(1)}_FY{m.group(2)}" if m else "")
 
-def _ensure_extracted(sym, pdf_stem, log_lines):
-    raw_path = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()/"raw_extractions.json"
-    all_raw = {}
-    if raw_path.exists():
-        with open(raw_path) as f: all_raw = json.load(f)
-    if pdf_stem in all_raw and all_raw[pdf_stem].get("page_results"):
-        log_lines.append(f"  [CACHE] {pdf_stem} already extracted")
-        return all_raw[pdf_stem].get("page_results", {})
-    log_lines.append(f"  [VISION] Running Mistral vision on {pdf_stem}...")
-    new_raw = extract_symbol(sym, force=False, verbose=False)
-    return new_raw.get(pdf_stem, {}).get("page_results", {})
+    def _ql(p):
+        m = re.search(r"(Q[1-4])_FY(\d{4})", p.stem)
+        return f"{m.group(1)}_FY{m.group(2)}" if m else ""
 
-def _badge(s):
-    cls = {"GOOD":"bg","WARN":"bw","FAIL":"bf","NEW":"bn",
-           "NO_PDF":"bp","NO_XBRL":"bp","ERROR":"be"}.get(s,"bp")
-    return f'<span class="badge {cls}">{s}</span>'
+    # Prefer latest PDF with XBRL coverage
+    if db is not None:
+        xbrl_qs = set(db[db["symbol"]==sym]["quarter_label"].dropna().tolist())
+        covered = [p for p in pdfs if _ql(p) in xbrl_qs]
+        if covered:
+            p = max(covered, key=_key)
+            return p.stem, _ql(p)
 
-def _log_cls(line):
-    if any(x in line for x in ["[ERROR]","✗","FAIL"]): return "lerr"
-    if any(x in line for x in ["[WARN]","⚠","ISSUE"]): return "lwarn"
-    if any(x in line for x in ["✓","[DONE]","[RESULT]"]): return "lok"
-    if any(x in line for x in ["[MISTRAL]","[VISION]","[XBRL]","[PDF]","[MODE]","[MATH"]): return "linfo"
-    if any(x in line for x in ["[CACHE]","[INFO]"]): return "ldim"
-    return ""
-
-def _render_log(lines):
-    html = ""
-    for line in lines:
-        cls  = _log_cls(line)
-        safe = line.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-        html += f'<div class="{cls}">{safe}</div>' if cls else f'<div>{safe}</div>'
-    return f'<div class="logbox">{html}</div>'
+    # Fallback: absolute latest
+    p = max(pdfs, key=_key)
+    return p.stem, _ql(p)
 
 def _save_log(sym, lines):
     with open(LOG_DIR/f"{sym}.log","w") as f:
-        f.write(f"# bloom_india verify — {sym}\n# {datetime.now().isoformat()}\n\n")
+        f.write(f"# {sym} — {datetime.now().isoformat()}\n\n")
         f.write("\n".join(lines))
 
 def _load_log(sym):
     p = LOG_DIR/f"{sym}.log"
     return open(p).read().splitlines() if p.exists() else []
 
-# ── Core ──────────────────────────────────────────────────────────────────────
-def verify_one(sym, db, force=False):
+def _clean_result(r: dict) -> dict:
+    """Make result JSON-serialisable."""
+    def _c(v):
+        if isinstance(v, float):  return round(v, 6)
+        if isinstance(v, dict):   return {k2: _c(v2) for k2,v2 in v.items()}
+        if isinstance(v, list):   return [_c(x) for x in v]
+        if hasattr(v, "item"):    return v.item()
+        return v
+    return _c(r)
+
+def _broadcast_log(sym: str, line: str, loop):
+    """Thread-safe WebSocket broadcast of a single log line."""
+    log.info(f"[{sym}] {line.strip()}")   # ← also write to file
+    if loop:
+        asyncio.run_coroutine_threadsafe(
+            manager.broadcast({"type":"log","symbol":sym,"line":line}),
+            loop,
+        )
+
+# ── Core verify (runs in thread) ───────────────────────────────────────────────
+def verify_one_sync(sym: str, db: pd.DataFrame,
+                    force_vision:  bool = False,
+                    force_extract: bool = False,
+                    loop=None,
+                    vision_model:  str = "pixtral-12b-2409",
+                    extract_model: str = "mistral-small-latest") -> dict:
     log_lines = []
     ts = datetime.now().strftime("%H:%M:%S")
     result = dict(symbol=sym, xbrl_latest="", pdf_latest="", status="UNKNOWN",
@@ -165,70 +188,250 @@ def verify_one(sym, db, force=False):
     xbrl_ql = _latest_xbrl(db, sym)
     result["xbrl_latest"] = xbrl_ql
     if not xbrl_ql:
-        log_lines.append("  [WARN] No XBRL data in fundamentals DB")
-        result["status"] = "NO_XBRL"; _save_log(sym, log_lines); return result, log_lines
-    log_lines.append(f"  [XBRL] Latest quarter: {xbrl_ql}")
+        log_lines.append("  [WARN] No XBRL data")
+        result["status"] = "NO_XBRL"
+        STATE["logs"][sym] = log_lines; _save_log(sym, log_lines)
+        return result
 
-    pdf_stem, pdf_ql = _latest_pdf(sym)
+    log_lines.append(f"  [XBRL] Latest: {xbrl_ql}")
+    pdf_stem, pdf_ql = _latest_pdf(sym, db=db)
     result["pdf_latest"] = pdf_ql or ""
+
     if not pdf_stem:
-        log_lines.append("  [INFO] No PDFs found")
-        result["status"] = "NO_PDF"; _save_log(sym, log_lines); return result, log_lines
+        log_lines.append("  [DOWNLOAD] No PDFs found — downloading from BSE...")
+        _broadcast_log(sym, log_lines[-1], loop)
+        try:
+            from bloom_india.data.fetch.filings import download_symbol
+            # Build XBRL coverage so we only download what's needed
+            xbrl_covered = set(db[db["symbol"]==sym]["quarter_label"].dropna().tolist())
+            dl_result    = download_symbol(
+                sym,
+                from_fy      = 2024,
+                force        = False,
+                verbose      = False,
+                xbrl_covered = xbrl_covered,
+            )
+            n_dl = dl_result.get("downloaded", 0)
+            if n_dl:
+                log_lines.append(f"  [DOWNLOAD] ✓ {n_dl} PDFs downloaded")
+                _broadcast_log(sym, log_lines[-1], loop)
+                # Re-check
+                pdf_stem, pdf_ql = _latest_pdf(sym, db=db)
+                result["pdf_latest"] = pdf_ql or ""
+            else:
+                gaps    = dl_result.get("gaps", [])
+                missing = dl_result.get("missing", [])
+                log_lines.append(f"  [DOWNLOAD] Nothing downloaded — gaps={gaps} missing={missing}")
+                _broadcast_log(sym, log_lines[-1], loop)
+        except Exception as e:
+            log_lines.append(f"  [DOWNLOAD] Error: {e}")
+            _broadcast_log(sym, log_lines[-1], loop)
+
+    if not pdf_stem:
+        log_lines.append("  [SKIP] No PDFs available after download attempt")
+        result["status"] = "NO_PDF"
+        STATE["logs"][sym] = log_lines; _save_log(sym, log_lines)
+        return result
+
     log_lines.append(f"  [PDF]  Latest: {pdf_stem} ({pdf_ql})")
+
+    # force_extract: clear mistral cache so all fields re-run
+    if force_extract and pdf_stem:
+        slug    = re.sub(r"[^\w\-]", "_", extract_model)
+        cache_p = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()/f"mistral_cache_{slug}.json"
+        if cache_p.exists():
+            try:
+                mc = json.load(open(cache_p))
+                if pdf_stem in mc:
+                    del mc[pdf_stem]
+                    json.dump(mc, open(cache_p,"w"), indent=2)
+                    msg = f"  [FORCE] Cleared mistral cache for {pdf_stem}"
+                    log_lines.append(msg); _broadcast_log(sym, msg, loop)
+            except Exception as e:
+                log.warning(f"  [FORCE] Cache clear error: {e}")
 
     is_new = _qkey(pdf_ql) > _qkey(xbrl_ql)
     result["is_new"] = is_new
     log_lines.append(f"  [MODE] {'NEW DATA' if is_new else 'VERIFY'} — "
                      f"PDF={pdf_ql} {'>' if is_new else '=='} XBRL={xbrl_ql}")
+    _broadcast_log(sym, log_lines[-1], loop)
 
     xbrl_row = None
     if not is_new and pdf_ql:
         rows = db[(db["symbol"]==sym)&(db["quarter_label"]==pdf_ql)]
         if not rows.empty:
             xbrl_row = rows.iloc[0].to_dict()
-            log_lines.append(f"  [XBRL] Reference: rev={xbrl_row.get('revenue')} "
+            log_lines.append(f"  [XBRL] rev={xbrl_row.get('revenue')} "
                              f"pat={xbrl_row.get('pat')} eps={xbrl_row.get('eps_basic')}")
         else:
-            log_lines.append(f"  [WARN] No XBRL row for {sym} {pdf_ql}")
+            log_lines.append(f"  [WARN] No XBRL row for {pdf_ql}")
 
     try:
-        page_results = _ensure_extracted(sym, pdf_stem, log_lines)
+        raw_path = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()/"raw_extractions.json"
+        all_raw = {}
+        if raw_path.exists():
+            with open(raw_path) as f: all_raw = json.load(f)
+
+        if not force_vision and pdf_stem in all_raw and all_raw[pdf_stem].get("page_results"):
+            # Check extractor matches — if switching from pixtral to docling, re-extract
+            cached_extractor = all_raw[pdf_stem].get("extractor", "pixtral")
+            req_extractor    = ("docling" if vision_model=="docling"
+                                else "gemini" if vision_model.startswith("gemini")
+                                else "pixtral")
+            if cached_extractor == req_extractor:
+                log_lines.append(f"  [CACHE] {pdf_stem} already extracted ({cached_extractor})")
+                _broadcast_log(sym, log_lines[-1], loop)
+                page_results = all_raw[pdf_stem].get("page_results", {})
+            else:
+                log_lines.append(f"  [SWITCH] Extractor changed {cached_extractor}→{req_extractor}, re-extracting...")
+                _broadcast_log(sym, log_lines[-1], loop)
+                page_results = None  # fall through to extraction
+        else:
+            page_results = None  # needs extraction
+
+        if page_results is None:
+            if vision_model == "docling":
+                log_lines.append(f"  [DOCLING] Extracting {pdf_stem} locally...")
+                _broadcast_log(sym, log_lines[-1], loop)
+                try:
+                    from bloom_india.data.process.pdf_docling_extractor import extract_pdf_docling
+                    def _docling_cb(line): _broadcast_log(sym, line, loop)
+                    pdf_path_obj = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()/f"{pdf_stem}.pdf"
+                    raw = extract_pdf_docling(
+                        str(pdf_path_obj), symbol=sym,
+                        force=force_vision, log_cb=_docling_cb,
+                    )
+                    page_results = raw.get("page_results", {})
+                    raw["extractor"] = "docling"
+                except Exception as e:
+                    log_lines.append(f"  [DOCLING] Error: {e} — falling back to Pixtral")
+                    _broadcast_log(sym, log_lines[-1], loop)
+                    page_results = {}
+
+            elif vision_model.startswith("gemini"):
+                log_lines.append(f"  [GEMINI] Extracting {pdf_stem} with {vision_model}...")
+                _broadcast_log(sym, log_lines[-1], loop)
+                try:
+                    from bloom_india.data.process.pdf_gemini_extractor import extract_pdf_gemini
+                    def _gemini_cb(line): _broadcast_log(sym, line, loop)
+                    pdf_path_obj = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()/f"{pdf_stem}.pdf"
+                    raw = extract_pdf_gemini(
+                        str(pdf_path_obj), symbol=sym,
+                        model=vision_model, force=force_vision,
+                        log_cb=_gemini_cb,
+                    )
+                    page_results = raw.get("page_results", {})
+                except Exception as e:
+                    log_lines.append(f"  [GEMINI] Error: {e}")
+                    _broadcast_log(sym, log_lines[-1], loop)
+                    page_results = {}
+            else:
+                log_lines.append(f"  [VISION] Running {vision_model} on {pdf_stem}...")
+                _broadcast_log(sym, log_lines[-1], loop)
+                def _vision_cb(line): _broadcast_log(sym, line, loop)
+                pdf_path_obj = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()/f"{pdf_stem}.pdf"
+                from bloom_india.data.process.pdf_extract import extract_pdf
+                raw = extract_pdf(
+                    str(pdf_path_obj), symbol=sym,
+                    force=force_vision, verbose=False, log_cb=_vision_cb,
+                )
+                raw["extractor"] = "pixtral"
+                page_results = raw.get("page_results", {})
+
+            # Save to raw_extractions.json
+            raw_path2 = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()/"raw_extractions.json"
+            all_raw2  = {}
+            if raw_path2.exists():
+                with open(raw_path2) as f: all_raw2 = json.load(f)
+            all_raw2[pdf_stem] = raw
+            with open(raw_path2, "w") as f: json.dump(all_raw2, f)
+
+            log_lines.append(f"  [VISION] Done — {len(page_results)} pages")
+            _broadcast_log(sym, log_lines[-1], loop)
+
     except Exception as e:
-        log_lines.append(f"  [ERROR] Vision extraction: {e}")
-        result["status"] = "ERROR"; _save_log(sym, log_lines); return result, log_lines
+        log.error(f"  [ERROR] Extraction {sym}: {e}", exc_info=True)
+        log_lines.append(f"  [ERROR] Extraction: {e}")
+        _broadcast_log(sym, log_lines[-1], loop)
+        result["status"] = "ERROR"
+        STATE["logs"][sym] = log_lines; _save_log(sym, log_lines)
+        return result
 
     if not page_results:
         log_lines.append("  [ERROR] No page_results after extraction")
-        result["status"] = "ERROR"; _save_log(sym, log_lines); return result, log_lines
+        _broadcast_log(sym, log_lines[-1], loop)
+        result["status"] = "ERROR"
+        STATE["logs"][sym] = log_lines; _save_log(sym, log_lines)
+        return result
 
     n_tables = sum(1 for p in page_results.values() if p.get("has_financial_table"))
     log_lines.append(f"  [PDF]  {len(page_results)} pages, {n_tables} with tables")
+    _broadcast_log(sym, log_lines[-1], loop)
 
+    # ── Detect reporting units (Lakhs vs Crores) ──────────────────────────────
+    unit_scale = 1.0
+    for page_data in page_results.values():
+        raw_text = str(page_data).lower()
+        if any(x in raw_text for x in ["in lakhs","rs. lakhs","rs lakhs","₹ lakhs","lakh"]):
+            unit_scale = 0.01
+            msg = f"  [UNITS] Lakhs detected — scaling ÷100 to Crores"
+            log_lines.append(msg); _broadcast_log(sym, msg, loop)
+            break
+        elif any(x in raw_text for x in ["in millions","rs. millions","usd million"]):
+            unit_scale = 0.1
+            msg = f"  [UNITS] Millions detected — scaling ×0.1 to Crores"
+            log_lines.append(msg); _broadcast_log(sym, msg, loop)
+            break
+
+    _broadcast_log(sym, f"  [MODEL] vision={vision_model}  extract={extract_model}", loop)
+
+    log.info(f"  Starting field extraction for {sym}/{pdf_stem}")
     try:
+        _loop = loop
+        _sym  = sym
+
+        def _field_log_cb(line: str):
+            STATE["logs"].setdefault(_sym, []).append(line)
+            log.info(f"[{_sym}] {line.strip()}")
+            if _loop:
+                asyncio.run_coroutine_threadsafe(
+                    manager.broadcast({"type":"log","symbol":_sym,"line":line}),
+                    _loop,
+                )
+
+        _field_log_cb(f"  [START] Field extraction — {len(FIELDS)} fields  model={extract_model}  unit_scale={unit_scale}")
+
+        log.info(f"  Calling extract_pdf_fields for {sym}/{pdf_stem} force_extract={force_extract}")
         ext = extract_pdf_fields(
             symbol=sym, pdf_stem=pdf_stem, page_results=page_results,
             quarter_label=pdf_ql or "", xbrl_row=xbrl_row,
-            force=force, verbose=False,
+            force=force_extract, verbose=False, log_cb=_field_log_cb,
+            model=extract_model, unit_scale=unit_scale,
         )
+        log.info(f"  extract_pdf_fields done for {sym}: {len(ext.get('fields',{}))} fields")
     except Exception as e:
+        log.error(f"  [ERROR] Field extraction {sym}: {e}", exc_info=True)
         log_lines.append(f"  [ERROR] Field extraction: {e}")
-        result["status"] = "ERROR"; _save_log(sym, log_lines); return result, log_lines
+        _broadcast_log(sym, log_lines[-1], loop)
+        result["status"] = "ERROR"
+        STATE["logs"][sym] = log_lines; _save_log(sym, log_lines)
+        return result
 
     result.update(fields=ext["fields"], labels=ext.get("labels",{}),
                   math=ext["math"], verdict=ext["verdict"],
                   score=ext["score"], issues=ext["issues"])
 
     log_lines.append(f"  [RESULT] {len(ext['fields'])} fields | "
-                     f"verdict={ext['verdict']} | score={ext['score']}")
+                     f"verdict={ext['verdict']} score={ext['score']}")
 
-    log_lines.append("  [MATH CHECKS]")
+    log_lines.append("  [MATH]")
     for mc in ext.get("math",[]):
         s = "✓" if mc["status"]=="PASS" else "⚠" if mc["status"]=="WARN" else "✗"
         log_lines.append(f"    {s} {mc['field']:<28} "
-                         f"expected={mc['expected']:.2f}  got={mc['got']:.2f}  ({mc['diff_pct']:.1f}%)")
+                         f"exp={mc['expected']:.2f} got={mc['got']:.2f} ({mc['diff_pct']:.1f}%)")
 
     if xbrl_row:
-        log_lines.append("  [XBRL FIELD COMPARISON]")
+        log_lines.append("  [XBRL COMPARE]")
         for field in ["revenue","pat","eps_basic","eps_diluted","interest_expended",
                       "equity_capital","npa_gross_cr","npa_net_cr","deposits_bank"]:
             pv = ext["fields"].get(field)
@@ -236,11 +439,11 @@ def verify_one(sym, db, force=False):
                 log_lines.append(f"    — {field:<28} not extracted"); continue
             xv_raw = xbrl_row.get(field)
             if xv_raw is None or str(xv_raw)=="nan":
-                log_lines.append(f"    · {field:<28} pdf={pv:.4f}  xbrl=N/A"); continue
+                log_lines.append(f"    · {field:<28} pdf={pv:.4f} xbrl=N/A"); continue
             xv   = float(xv_raw)
             diff = abs(pv-xv)/(abs(xv)+1e-9)*100
             s    = "✓" if diff<1 else "⚠" if diff<5 else "✗"
-            log_lines.append(f"    {s} {field:<28} pdf={pv:.4f}  xbrl={xv:.4f}  ({diff:.1f}%)")
+            log_lines.append(f"    {s} {field:<28} pdf={pv:.4f} xbrl={xv:.4f} ({diff:.1f}%)")
 
     if ext["issues"]:
         log_lines.append("  [ISSUES]")
@@ -250,517 +453,250 @@ def verify_one(sym, db, force=False):
                         "GOOD" if ext["verdict"]=="GOOD" else
                         "WARN" if ext["verdict"]=="WARN" else "FAIL")
     log_lines.append(f"  [DONE] → {result['status']}")
+    STATE["logs"][sym] = log_lines
     _save_log(sym, log_lines)
-    return result, log_lines
+    return result
 
-# ── Load data ─────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=300)
-def load_db():
-    return pd.read_parquet(str(CONFIG.storage.fundamental_db))
+# ── Background run thread ─────────────────────────────────────────────────────
+_db_cache: Optional[pd.DataFrame] = None
 
-@st.cache_data
-def load_universe():
+def _get_db() -> pd.DataFrame:
+    global _db_cache
+    if _db_cache is None:
+        _db_cache = pd.read_parquet(str(CONFIG.storage.fundamental_db))
+    return _db_cache
+
+def _run_thread(syms: list, force_vision: bool, force_extract: bool,
+                loop: asyncio.AbstractEventLoop,
+                vision_model: str = "pixtral-12b-2409",
+                extract_model: str = "mistral-small-latest"):
+    db = _get_db()
+    STATE["running"]  = True
+    STATE["progress"] = 0
+    STATE["total"]    = len(syms)
+    STATE["current"]  = ""
+
+    for i, sym in enumerate(syms):
+        if not STATE["running"]:
+            break
+
+        # Skip if already running (dedup)
+        with _running_lock:
+            if sym in _running_syms:
+                log.warning(f"  [SKIP] {sym} already running — skipped")
+                continue
+            _running_syms.add(sym)
+
+        STATE["current"]  = sym
+        STATE["progress"] = i
+
+        asyncio.run_coroutine_threadsafe(
+            manager.broadcast({"type":"progress","current":sym,
+                               "progress":i,"total":len(syms)}),
+            loop,
+        )
+
+        try:
+            r = verify_one_sync(sym, db,
+                                force_vision=force_vision,
+                                force_extract=force_extract,
+                                loop=loop,
+                                vision_model=vision_model,
+                                extract_model=extract_model)
+        except Exception as e:
+            r = dict(symbol=sym, status="ERROR", xbrl_latest="", pdf_latest="",
+                     verdict="", score=0, fields={}, labels={}, math=[],
+                     issues=[str(e)], is_new=False,
+                     ts=datetime.now().strftime("%H:%M:%S"))
+            STATE["logs"][sym] = [f"[ERROR] {e}"]
+            _save_log(sym, [f"[ERROR] {e}"])
+
+        STATE["results"][sym] = _clean_result(r)
+
+        with _running_lock:
+            _running_syms.discard(sym)
+
+        # Broadcast result
+        asyncio.run_coroutine_threadsafe(
+            manager.broadcast({"type":"result","symbol":sym,
+                               "result":STATE["results"][sym]}),
+            loop,
+        )
+
+    STATE["running"]  = False
+    STATE["current"]  = ""
+    STATE["progress"] = len(syms)
+
+    asyncio.run_coroutine_threadsafe(
+        manager.broadcast({"type":"done","total":len(syms)}),
+        loop,
+    )
+
+# ── FastAPI routes ─────────────────────────────────────────────────────────────
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    html_path = Path(__file__).parent / "verify.html"
+    return HTMLResponse(html_path.read_text())
+
+@app.get("/api/state")
+async def get_state():
+    return JSONResponse({
+        "running":  STATE["running"],
+        "progress": STATE["progress"],
+        "total":    STATE["total"],
+        "current":  STATE["current"],
+        "results":  STATE["results"],
+    })
+
+@app.get("/api/universe")
+async def get_universe_api():
     p = Path(CONFIG.storage.base_dir)/"nifty500.json"
     if p.exists():
         data = json.load(open(p))
-        return [s["symbol"] if isinstance(s,dict) else s for s in data]
-    return sorted(load_db()["symbol"].unique().tolist())
-
-try:
-    db       = load_db()
-    universe = load_universe()
-except Exception as e:
-    st.error(f"Could not load data: {e}"); st.stop()
-
-# ── Header ────────────────────────────────────────────────────────────────────
-st.markdown("""
-<div class="vhdr">
-  <span class="vhdr-t">◈ PDF × XBRL</span>
-  <span class="vhdr-s">VERIFICATION DASHBOARD</span>
-</div>""", unsafe_allow_html=True)
-
-# ── Controls ──────────────────────────────────────────────────────────────────
-cc1, cc2, cc3, cc4, cc5 = st.columns([2,2,1,1,1])
-with cc1:
-    mode = st.selectbox("Mode",["Single symbol","All symbols with PDFs","Full Nifty500"],key="mode")
-with cc2:
-    filings_root = Path(CONFIG.storage.raw_dir)/"filings"
-    if mode=="Single symbol":
-        have_pdfs = sorted([s for s in universe
-                            if (filings_root/s).exists() and list((filings_root/s).glob("*.pdf"))])
-        sym_sel = st.selectbox("Symbol", have_pdfs or universe, key="sym_sel")
+        syms = [s["symbol"] if isinstance(s,dict) else s for s in data]
     else:
-        sym_sel = None
-        n_have = sum(1 for s in universe
-                     if (filings_root/s).exists() and list((filings_root/s).glob("*.pdf")))
-        st.markdown(f'<div style="padding-top:28px;color:#1e3a52;font-size:10px">'
-                    f'{n_have} have PDFs / {len(universe)} total</div>',
-                    unsafe_allow_html=True)
-with cc3:
-    force = st.checkbox("Force re-extract", False, key="force")
-with cc4:
-    run_btn = st.button("▶ RUN", disabled=st.session_state.running, key="run_btn")
-with cc5:
-    if st.button("✕ Clear", key="clear_btn"):
-        st.session_state.results  = {}
-        st.session_state.progress = 0
-        st.session_state.total    = 0
-        st.session_state.sel_sym  = None
-        st.rerun()
+        db = _get_db()
+        syms = sorted(db["symbol"].unique().tolist())
+    # Mark which have PDFs
+    filings_root = Path(CONFIG.storage.raw_dir)/"filings"
+    result = []
+    for sym in syms:
+        has_pdf = (filings_root/sym).exists() and bool(list((filings_root/sym).glob("*.pdf")))
+        result.append({"symbol":sym, "has_pdf":has_pdf})
+    return JSONResponse(result)
 
-if st.session_state.total > 0:
-    pct = st.session_state.progress / st.session_state.total
-    st.markdown(
-        f'<div class="prog-wrap"><div class="prog-fill" style="width:{pct*100:.1f}%"></div></div>'
-        f'<div style="font-size:9px;color:#1e3a52">'
-        f'{st.session_state.progress}/{st.session_state.total} processed</div>',
-        unsafe_allow_html=True,
-    )
+@app.post("/api/run")
+async def start_run(body: dict):
+    if STATE["running"]:
+        return JSONResponse({"error":"already running"}, status_code=409)
 
-# ── Run ───────────────────────────────────────────────────────────────────────
-if run_btn:
-    if mode=="Single symbol" and sym_sel:
-        syms = [sym_sel]
-    elif mode=="All symbols with PDFs":
-        syms = [s for s in universe
+    mode          = body.get("mode","single")
+    sym           = body.get("symbol","")
+    force_vision  = body.get("force_vision",  False)
+    force_extract = body.get("force_extract", False)
+    # legacy: if old 'force' key sent, apply to both
+    if body.get("force", False):
+        force_vision = force_extract = True
+    vision_model  = body.get("vision_model",  "pixtral-12b-2409")
+    extract_model = body.get("extract_model", "mistral-small-latest")
+
+    filings_root = Path(CONFIG.storage.raw_dir)/"filings"
+    db = _get_db()
+    all_syms = sorted(db["symbol"].unique().tolist())
+
+    if mode == "single" and sym:
+        syms = [sym.upper()]
+    elif mode == "pdfs":
+        syms = [s for s in all_syms
                 if (filings_root/s).exists() and list((filings_root/s).glob("*.pdf"))]
     else:
-        syms = universe
+        syms = all_syms
 
-    st.session_state.running  = True
-    st.session_state.progress = 0
-    st.session_state.total    = len(syms)
-    prog_ph   = st.empty()
-    status_ph = st.empty()
+    for s in syms:
+        STATE["results"].pop(s, None)
 
-    for sym in syms:
-        status_ph.markdown(
-            f'<div style="font-size:10px;color:#1e3a52">Processing {sym}...</div>',
-            unsafe_allow_html=True,
-        )
+    loop = asyncio.get_event_loop()
+    t = threading.Thread(
+        target=_run_thread,
+        args=(syms, force_vision, force_extract, loop, vision_model, extract_model),
+        daemon=True,
+    )
+    t.start()
+
+    return JSONResponse({"started":True,"total":len(syms)})
+
+@app.post("/api/stop")
+async def stop_run():
+    STATE["running"] = False
+    return JSONResponse({"stopped":True})
+
+@app.get("/api/raw_symbols")
+async def get_raw_symbols():
+    """List all symbols that have raw_extractions.json."""
+    filings_root = Path(CONFIG.storage.raw_dir)/"filings"
+    syms = sorted([
+        p.parent.name for p in filings_root.glob("*/raw_extractions.json")
+    ])
+    return JSONResponse(syms)
+
+@app.get("/api/raw/{symbol}")
+async def get_raw_extraction(symbol: str, model: str = ""):
+    """
+    Return all vision extractions for a symbol, keyed by model name.
+    Also includes mistral extraction caches keyed as 'extract:{model}'.
+    Returns: {model_name: {pdf_stem: {page_num: page_data}}}
+    """
+    filings_dir = Path(CONFIG.storage.raw_dir)/"filings"/symbol.upper()
+    if not filings_dir.exists():
+        return JSONResponse({})
+
+    result = {}
+
+    # ── Vision model caches (.cache_{model}/) ──────────────────────────────
+    for cache_dir in sorted(filings_dir.glob(".cache_*")):
+        model_name = cache_dir.name.replace(".cache_", "").replace("_", "-")
+        if model and model.replace("-","_") not in cache_dir.name:
+            continue
+        for pdf_dir in sorted(cache_dir.iterdir()):
+            if not pdf_dir.is_dir(): continue
+            pdf_stem = pdf_dir.name
+            pages    = {}
+            for pf in sorted(pdf_dir.glob("page_*.json")):
+                try:
+                    pd_data  = json.load(open(pf))
+                    page_num = str(int(pf.stem.replace("page_","")))
+                    pages[page_num] = pd_data
+                except Exception: continue
+            if pages:
+                result.setdefault(model_name, {})[pdf_stem] = pages
+
+    # ── Extraction model caches (mistral_cache_{model}.json) ───────────────
+    for cache_file in sorted(filings_dir.glob("mistral_cache_*.json")):
+        model_slug = cache_file.stem.replace("mistral_cache_","").replace("_","-")
+        key        = f"extract:{model_slug}"
+        if model and model not in key: continue
         try:
-            r, _ = verify_one(sym, db, force=force)
-        except Exception as e:
-            r = dict(symbol=sym, status="ERROR", xbrl_latest="", pdf_latest="",
-                     verdict="", score=0, fields={}, labels={}, math=[], issues=[str(e)],
-                     is_new=False, ts=datetime.now().strftime("%H:%M:%S"))
-            _save_log(sym, [f"[ERROR] {e}"])
-        st.session_state.results[sym] = r
-        st.session_state.progress    += 1
-        pct = st.session_state.progress / st.session_state.total
-        prog_ph.markdown(
-            f'<div class="prog-wrap"><div class="prog-fill" style="width:{pct*100:.1f}%">'
-            f'</div></div><div style="font-size:9px;color:#1e3a52">'
-            f'{st.session_state.progress}/{st.session_state.total} — {sym} {r["status"]}</div>',
-            unsafe_allow_html=True,
-        )
-    st.session_state.running = False
-    status_ph.empty()
-    st.rerun()
+            data = json.load(open(cache_file))
+            # data = {pdf_stem: {field: {value, label, confidence}}}
+            for pdf_stem, fields in data.items():
+                # Convert to page-like format for display
+                result.setdefault(key, {})[pdf_stem] = {
+                    "fields": fields,
+                    "_type":  "extraction_cache",
+                    "_model": model_slug,
+                }
+        except Exception: continue
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-results = st.session_state.results
-t1, t2, t3, t4 = st.tabs(["OVERVIEW","SCORE ANALYSIS","INSPECTOR","LOGS"])
+    return JSONResponse(result)
+    lines = STATE["logs"].get(symbol.upper()) or _load_log(symbol.upper())
+    return JSONResponse({"symbol":symbol.upper(),"lines":lines})
 
-# ══════════════ TAB 1: OVERVIEW ══════════════
-with t1:
-    if not results:
-        st.markdown('<div style="color:#1e3a52;padding:60px;text-align:center">'
-                    'Select a mode and click ▶ RUN.</div>', unsafe_allow_html=True)
-    else:
-        counts = {}
-        for r in results.values(): counts[r["status"]] = counts.get(r["status"],0)+1
-        stat_html = '<div class="sbar">'
-        for status,color in [("GOOD","#22c55e"),("WARN","#f59e0b"),("FAIL","#ef4444"),
-                              ("NEW","#38bdf8"),("NO_PDF","#475569"),("ERROR","#f472b6")]:
-            n = counts.get(status,0)
-            stat_html += (f'<div class="stat"><div class="sv" style="color:{color}">{n}</div>'
-                          f'<div class="sl">{status}</div></div>')
-        stat_html += (f'<div class="stat"><div class="sv" style="color:#94a3b8">'
-                      f'{len(results)}</div><div class="sl">TOTAL</div></div></div>')
-        st.markdown(stat_html, unsafe_allow_html=True)
+@app.get("/api/logs")
+async def list_logs():
+    saved = sorted([p.stem for p in LOG_DIR.glob("*.log")])
+    return JSONResponse(saved)
 
-        st.markdown(
-            '<div class="srow" style="color:#1e3a52;font-size:9px;letter-spacing:0.1em">'
-            '<span>SYMBOL</span><span>XBRL</span><span>PDF</span>'
-            '<span>STATUS</span><span>SCORE</span><span>ISSUES</span></div>',
-            unsafe_allow_html=True,
-        )
-        sort_ord = {"FAIL":0,"ERROR":1,"WARN":2,"NEW":3,"GOOD":4,"NO_PDF":5,"NO_XBRL":6,"UNKNOWN":7}
-        for sym in sorted(results, key=lambda s: sort_ord.get(results[s]["status"],9)):
-            r  = results[sym]
-            ni = len(r.get("issues",[]))
-            sc = r.get("score",0)
-            sc_color = "#22c55e" if sc>=85 else "#f59e0b" if sc>=60 else "#ef4444"
-            st.markdown(
-                f'<div class="srow">'
-                f'<span style="color:#7dd3fc;font-weight:600">{sym}</span>'
-                f'<span style="color:#334155">{r["xbrl_latest"]}</span>'
-                f'<span style="color:#334155">{r["pdf_latest"]}</span>'
-                f'<span>{_badge(r["status"])}</span>'
-                f'<span style="color:{sc_color};font-weight:700">{sc if sc else "—"}</span>'
-                f'<span style="color:{"#ef4444" if ni else "#1e3a52"}">'
-                f'{"⚠ "+str(ni) if ni else "—"}</span></div>',
-                unsafe_allow_html=True,
-            )
-            if st.button(f"→ inspect {sym}", key=f"ins_{sym}",
-                         help=f"Open {sym} in Inspector tab"):
-                st.session_state.sel_sym = sym
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await manager.connect(ws)
+    # Send current state immediately on connect
+    await ws.send_json({
+        "type":     "state",
+        "running":  STATE["running"],
+        "progress": STATE["progress"],
+        "total":    STATE["total"],
+        "current":  STATE["current"],
+        "results":  STATE["results"],
+    })
+    try:
+        while True:
+            await asyncio.sleep(30)  # keep-alive
+    except WebSocketDisconnect:
+        manager.disconnect(ws)
 
-        st.markdown('<hr class="dvd">', unsafe_allow_html=True)
-        if st.button("⬇ Export JSON", key="export"):
-            out = []
-            for sym, r in results.items():
-                out.append({k:v for k,v in r.items() if k not in ("fields","labels")} | {
-                    "fields_count": len(r.get("fields",{})),
-                    "key_fields": {k:round(v,4) if isinstance(v,float) else v
-                                   for k,v in r.get("fields",{}).items()
-                                   if k in ["revenue","pat","eps_basic","eps_diluted"]}
-                })
-            p = Path(CONFIG.storage.base_dir)/"verify_report.json"
-            json.dump(out, open(p,"w"), indent=2)
-            st.success(f"Saved → {p}")
-
-# ══════════════ TAB 2: SCORE ANALYSIS ══════════════
-with t2:
-    verified = {s:r for s,r in results.items()
-                if r["status"] in ("GOOD","WARN","FAIL") and r["score"]>0}
-    if not verified:
-        st.markdown('<div style="color:#1e3a52;padding:40px">No verified results yet.</div>',
-                    unsafe_allow_html=True)
-    else:
-        scores = [r["score"] for r in verified.values()]
-        avg    = sum(scores)/len(scores)
-        med    = sorted(scores)[len(scores)//2]
-
-        c1,c2,c3 = st.columns(3)
-        c1.markdown(f'<div class="stat"><div class="sv" style="color:#38bdf8">{avg:.0f}</div>'
-                    f'<div class="sl">AVG SCORE</div></div>', unsafe_allow_html=True)
-        c2.markdown(f'<div class="stat"><div class="sv" style="color:#7dd3fc">{med}</div>'
-                    f'<div class="sl">MEDIAN</div></div>', unsafe_allow_html=True)
-        c3.markdown(f'<div class="stat"><div class="sv" style="color:#94a3b8">{len(verified)}</div>'
-                    f'<div class="sl">VERIFIED</div></div>', unsafe_allow_html=True)
-
-        st.markdown('<hr class="dvd">', unsafe_allow_html=True)
-
-        # Score distribution
-        st.markdown('<div style="font-size:9px;color:#1e3a52;letter-spacing:0.12em;'
-                    'margin-bottom:10px">SCORE DISTRIBUTION</div>', unsafe_allow_html=True)
-        buckets = [(f"{i}–{i+9}", sum(1 for s in scores if i<=s<i+10)) for i in range(0,101,10)]
-        max_n   = max(n for _,n in buckets) or 1
-        chart   = ""
-        for label,n in buckets:
-            lo    = int(label.split("–")[0])
-            color = "#22c55e" if lo>=85 else "#f59e0b" if lo>=60 else "#ef4444"
-            w     = max(4, int(n/max_n*320))
-            chart += (f'<div style="display:flex;align-items:center;gap:10px;margin:3px 0">'
-                      f'<span style="color:#334155;font-size:10px;width:50px">{label}</span>'
-                      f'<div style="background:{color};height:14px;width:{w}px;border-radius:2px"></div>'
-                      f'<span style="color:#475569;font-size:10px">{n}</span></div>')
-        st.markdown(chart, unsafe_allow_html=True)
-
-        st.markdown('<hr class="dvd">', unsafe_allow_html=True)
-
-        # Field hit rate
-        st.markdown('<div style="font-size:9px;color:#1e3a52;letter-spacing:0.12em;'
-                    'margin-bottom:10px">FIELD EXTRACTION HIT RATE</div>', unsafe_allow_html=True)
-        key_flds = ["revenue","pat","eps_basic","eps_diluted","interest_expended",
-                    "employee_cost","operating_expenses_bank","operating_profit_bank",
-                    "provisions_bank","profit_before_tax","tax","npa_gross_cr",
-                    "npa_net_cr","npa_pct_gross","car","equity_capital",
-                    "reserves_surplus","deposits_bank","borrowings_current"]
-        hit_html = ""
-        for field in key_flds:
-            n_hit = sum(1 for r in verified.values() if r["fields"].get(field) is not None)
-            rate  = n_hit/len(verified)
-            color = "#22c55e" if rate>=0.8 else "#f59e0b" if rate>=0.5 else "#ef4444"
-            w     = max(4, int(rate*280))
-            hit_html += (
-                f'<div style="display:flex;align-items:center;gap:10px;margin:2px 0">'
-                f'<span style="color:#475569;font-size:10px;width:200px;font-family:monospace">'
-                f'{field}</span>'
-                f'<div style="background:{color};height:10px;width:{w}px;border-radius:2px"></div>'
-                f'<span style="color:{color};font-size:10px">{rate*100:.0f}%</span></div>'
-            )
-        st.markdown(hit_html, unsafe_allow_html=True)
-
-        st.markdown('<hr class="dvd">', unsafe_allow_html=True)
-
-        # Failure patterns
-        fail_warn = {s:r for s,r in verified.items() if r["status"] in ("FAIL","WARN")}
-        if fail_warn:
-            st.markdown('<div style="font-size:9px;color:#1e3a52;letter-spacing:0.12em;'
-                        'margin-bottom:10px">FAILURE PATTERNS</div>', unsafe_allow_html=True)
-            issue_counts = {}
-            for r in fail_warn.values():
-                for issue in r.get("issues",[]):
-                    if "MATH" in issue:   key = "Math check failed"
-                    elif "XBRL FAIL" in issue:
-                        f = re.search(r"\] (\w+):", issue)
-                        key = f"XBRL mismatch: {f.group(1) if f else '?'}"
-                    elif "HALLUCINATION" in issue: key = "Hallucination detected"
-                    else: key = issue[:50]
-                    issue_counts[key] = issue_counts.get(key,0)+1
-            for issue,n in sorted(issue_counts.items(), key=lambda x:-x[1]):
-                st.markdown(
-                    f'<div style="display:flex;gap:12px;padding:4px 0;font-size:11px">'
-                    f'<span style="color:#ef4444;min-width:28px;text-align:right">{n}×</span>'
-                    f'<span style="color:#94a3b8">{issue}</span></div>',
-                    unsafe_allow_html=True,
-                )
-
-        # Failing symbols table
-        if fail_warn:
-            st.markdown('<hr class="dvd">', unsafe_allow_html=True)
-            st.markdown('<div style="font-size:9px;color:#1e3a52;letter-spacing:0.12em;'
-                        'margin-bottom:8px">SYMBOLS NEEDING ATTENTION</div>',
-                        unsafe_allow_html=True)
-            for sym, r in sorted(fail_warn.items(), key=lambda x: x[1]["score"]):
-                sc    = r["score"]
-                color = "#f59e0b" if r["status"]=="WARN" else "#ef4444"
-                issues_str = " | ".join(r.get("issues",[]))[:80]
-                st.markdown(
-                    f'<div style="display:grid;grid-template-columns:100px 60px 60px 1fr;'
-                    f'gap:8px;padding:5px 10px;border-bottom:1px solid #061525;font-size:11px">'
-                    f'<span style="color:#7dd3fc;font-weight:600">{sym}</span>'
-                    f'<span>{_badge(r["status"])}</span>'
-                    f'<span style="color:{color};font-weight:700">{sc}</span>'
-                    f'<span style="color:#334155;overflow:hidden;white-space:nowrap;'
-                    f'text-overflow:ellipsis">{issues_str}</span></div>',
-                    unsafe_allow_html=True,
-                )
-                if st.button(f"→ inspect {sym}", key=f"fa_{sym}"):
-                    st.session_state.sel_sym = sym
-
-# ══════════════ TAB 3: INSPECTOR ══════════════
-with t3:
-    ic1, ic2 = st.columns([1,2])
-    with ic1:
-        if not results:
-            st.markdown('<div style="color:#1e3a52;padding:20px">No results yet.</div>',
-                        unsafe_allow_html=True)
-        else:
-            st.markdown('<div style="font-size:9px;color:#1e3a52;letter-spacing:0.12em;'
-                        'margin-bottom:8px">SELECT SYMBOL</div>', unsafe_allow_html=True)
-            sort_ord = {"FAIL":0,"ERROR":1,"WARN":2,"NEW":3,"GOOD":4,"NO_PDF":5,"NO_XBRL":6}
-            for sym in sorted(results, key=lambda s: sort_ord.get(results[s]["status"],9)):
-                r  = results[sym]
-                sc = f" [{r['score']}]" if r.get("score") else ""
-                if st.button(f"{sym}{sc}", key=f"insp_{sym}",
-                             help=f"{r['status']} {r.get('verdict','')}",
-                             use_container_width=True):
-                    st.session_state.sel_sym = sym
-                    st.rerun()
-
-    with ic2:
-        sel = st.session_state.sel_sym
-        if not sel or sel not in results:
-            st.markdown('<div style="color:#1e3a52;font-size:12px;padding:60px;text-align:center">'
-                        '← Select a symbol.</div>', unsafe_allow_html=True)
-        else:
-            r = results[sel]
-            st.markdown(
-                f'<div style="margin-bottom:14px">'
-                f'<span style="font-size:20px;font-weight:800;color:#7dd3fc">{sel}</span>'
-                f'  {_badge(r["status"])}'
-                f'  <span style="font-size:10px;color:#1e3a52">'
-                f'score={r["score"]} | XBRL:{r["xbrl_latest"]} → PDF:{r["pdf_latest"]}'
-                f'{"  🆕 NEW QUARTER" if r.get("is_new") else ""}'
-                f'</span></div>',
-                unsafe_allow_html=True,
-            )
-
-            # Math checks
-            if r.get("math"):
-                st.markdown('<div style="font-size:9px;color:#1e3a52;letter-spacing:0.12em;'
-                            'margin-bottom:6px">MATH CHECKS</div>', unsafe_allow_html=True)
-                for mc in r["math"]:
-                    s     = "✓" if mc["status"]=="PASS" else "⚠" if mc["status"]=="WARN" else "✗"
-                    color = "#22c55e" if mc["status"]=="PASS" else \
-                            "#f59e0b" if mc["status"]=="WARN" else "#ef4444"
-                    st.markdown(
-                        f'<div style="display:flex;gap:10px;padding:4px 10px;font-size:11px;'
-                        f'border-bottom:1px solid #061525">'
-                        f'<span style="color:{color};font-weight:700;min-width:14px">{s}</span>'
-                        f'<span style="color:#475569;width:160px;font-family:monospace">'
-                        f'{mc["field"]}</span>'
-                        f'<span style="color:#334155">exp={mc["expected"]:.2f}</span>'
-                        f'<span style="color:#334155">got={mc["got"]:.2f}</span>'
-                        f'<span style="color:{color}">({mc["diff_pct"]:.1f}%)</span></div>',
-                        unsafe_allow_html=True,
-                    )
-                st.markdown('<hr class="dvd">', unsafe_allow_html=True)
-
-            # Field comparison
-            fields = r.get("fields",{})
-            labels = r.get("labels",{})
-            xbrl_ref = {}
-            if not r.get("is_new") and r["pdf_latest"]:
-                rows = db[(db["symbol"]==sel)&(db["quarter_label"]==r["pdf_latest"])]
-                if not rows.empty: xbrl_ref = rows.iloc[0].to_dict()
-
-            if fields:
-                st.markdown('<div style="font-size:9px;color:#1e3a52;letter-spacing:0.12em;'
-                            'margin-bottom:6px">FIELD VALUES</div>', unsafe_allow_html=True)
-                st.markdown(
-                    '<div class="ftrow" style="color:#1e3a52;font-size:9px">'
-                    '<span>FIELD</span><span style="text-align:right">PDF</span>'
-                    '<span style="text-align:right">XBRL</span>'
-                    '<span style="text-align:center">MATCH</span>'
-                    '<span>LABEL</span></div>',
-                    unsafe_allow_html=True,
-                )
-                all_flds = ["revenue","pat","eps_basic","eps_diluted","other_income",
-                            "total_income","interest_expended","employee_cost",
-                            "operating_expenses_bank","operating_profit_bank",
-                            "provisions_bank","profit_before_tax","tax","pat_minority",
-                            "npa_gross_cr","npa_net_cr","npa_pct_gross","npa_pct_net",
-                            "car","equity_capital","reserves_surplus",
-                            "deposits_bank","borrowings_current"]
-                rows_html = ""
-                for field in all_flds:
-                    pv = fields.get(field)
-                    if pv is None: continue
-                    xv_raw = xbrl_ref.get(field)
-                    lbl    = (labels.get(field) or "")[:42]
-                    if xv_raw is not None and str(xv_raw)!="nan":
-                        try:
-                            xv    = float(xv_raw)
-                            diff  = abs(pv-xv)/(abs(xv)+1e-9)*100
-                            color = "#22c55e" if diff<1 else "#f59e0b" if diff<5 else "#ef4444"
-                            match = (f'<span style="color:{color};font-weight:700">'
-                                     f'{"✓" if diff<1 else "⚠" if diff<5 else "✗"} '
-                                     f'{diff:.1f}%</span>')
-                            xv_s  = f"{xv:,.4f}"
-                        except:
-                            match,xv_s = '<span style="color:#1e3a52">—</span>',"—"
-                    else:
-                        match = '<span style="color:#1e3a52">—</span>'
-                        xv_s  = "N/A"
-                    rows_html += (
-                        f'<div class="ftrow">'
-                        f'<span style="color:#475569;font-family:monospace">{field}</span>'
-                        f'<span style="text-align:right;color:#94a3b8;font-family:monospace">'
-                        f'{pv:,.4f}</span>'
-                        f'<span style="text-align:right;color:#334155;font-family:monospace">'
-                        f'{xv_s}</span>'
-                        f'<span style="text-align:center">{match}</span>'
-                        f'<span style="color:#1e3a52;font-size:10px;overflow:hidden;'
-                        f'white-space:nowrap;text-overflow:ellipsis">{lbl}</span></div>'
-                    )
-                st.markdown(rows_html, unsafe_allow_html=True)
-
-            # Issues
-            if r.get("issues"):
-                st.markdown('<hr class="dvd">', unsafe_allow_html=True)
-                st.markdown('<div style="font-size:9px;color:#1e3a52;letter-spacing:0.12em;'
-                            'margin-bottom:6px">ISSUES</div>', unsafe_allow_html=True)
-                for issue in r["issues"]:
-                    color = "#ef4444" if "FAIL" in issue else "#f59e0b"
-                    st.markdown(
-                        f'<div style="font-size:11px;color:{color};padding:3px 10px">'
-                        f'! {issue}</div>',
-                        unsafe_allow_html=True,
-                    )
-
-            # Log inline
-            st.markdown('<hr class="dvd">', unsafe_allow_html=True)
-            st.markdown('<div style="font-size:9px;color:#1e3a52;letter-spacing:0.12em;'
-                        'margin-bottom:6px">EXECUTION LOG</div>', unsafe_allow_html=True)
-            lines = _load_log(sel)
-            st.markdown(_render_log(lines), unsafe_allow_html=True)
-
-# ══════════════ TAB 4: LOGS ══════════════
-with t4:
-    lc1, lc2 = st.columns([2,1])
-    with lc1:
-        log_filter = st.text_input("Search logs", placeholder="e.g. FAIL, revenue, ERROR",
-                                   key="log_filter")
-    with lc2:
-        show_only = st.selectbox("Filter by status",
-                                 ["All","FAIL only","WARN + FAIL","GOOD only","Has issues"],
-                                 key="log_show")
-
-    saved_logs = sorted([p.stem for p in LOG_DIR.glob("*.log")])
-
-    if not saved_logs:
-        st.markdown('<div style="color:#1e3a52;padding:40px;text-align:center">'
-                    'No logs saved yet. Run verification first.</div>',
-                    unsafe_allow_html=True)
-    else:
-        # Symbol selector + viewer
-        lv1, lv2 = st.columns([1,3])
-        with lv1:
-            log_sym = st.selectbox("Symbol log", saved_logs, key="log_sym")
-        with lv2:
-            if st.button("⬇ Download log", key="dl_log"):
-                pass  # handled by download_button below
-
-        log_sym = st.session_state.get("log_sym", saved_logs[0])
-        lines   = _load_log(log_sym)
-
-        # Search filter
-        filtered = [l for l in lines if log_filter.lower() in l.lower()] \
-                   if log_filter else lines
-
-        col_dlbtn, col_cnt = st.columns([1,4])
-        with col_dlbtn:
-            log_path = LOG_DIR/f"{log_sym}.log"
-            if log_path.exists():
-                st.download_button(
-                    f"⬇ {log_sym}.log",
-                    data      = open(log_path).read(),
-                    file_name = f"{log_sym}_verify.log",
-                    mime      = "text/plain",
-                    key       = "dl_log_btn",
-                )
-        with col_cnt:
-            st.markdown(
-                f'<div style="padding-top:10px;font-size:10px;color:#1e3a52">'
-                f'{len(filtered)} lines {("(filtered)" if log_filter else "")}</div>',
-                unsafe_allow_html=True,
-            )
-
-        st.markdown(_render_log(filtered), unsafe_allow_html=True)
-
-        st.markdown('<hr class="dvd">', unsafe_allow_html=True)
-
-        # All logs summary
-        st.markdown('<div style="font-size:9px;color:#1e3a52;letter-spacing:0.12em;'
-                    'margin-bottom:8px">ALL SAVED LOGS</div>', unsafe_allow_html=True)
-
-        hdr = (
-            '<div style="display:grid;grid-template-columns:100px 72px 60px 1fr;'
-            'gap:6px;padding:4px 10px;font-size:9px;color:#1e3a52;letter-spacing:0.1em">'
-            '<span>SYMBOL</span><span>STATUS</span><span>SCORE</span>'
-            '<span>LAST LOG LINE</span></div>'
-        )
-        rows_html = hdr
-        for sym in saved_logs:
-            r      = results.get(sym,{})
-            status = r.get("status","?")
-
-            if show_only=="FAIL only"   and status!="FAIL":               continue
-            if show_only=="WARN + FAIL" and status not in ("WARN","FAIL"): continue
-            if show_only=="GOOD only"   and status!="GOOD":               continue
-            if show_only=="Has issues"  and not r.get("issues"):          continue
-
-            lines_all = _load_log(sym)
-            if log_filter and log_filter.lower() not in " ".join(lines_all).lower():
-                continue
-
-            last  = lines_all[-1] if lines_all else ""
-            sc    = r.get("score","")
-            color = "#22c55e" if status=="GOOD" else \
-                    "#f59e0b" if status=="WARN" else \
-                    "#ef4444" if status=="FAIL" else "#475569"
-            rows_html += (
-                f'<div style="display:grid;grid-template-columns:100px 72px 60px 1fr;'
-                f'gap:6px;padding:5px 10px;border-bottom:1px solid #061525;font-size:11px">'
-                f'<span style="color:#7dd3fc;font-weight:600">{sym}</span>'
-                f'<span style="color:{color}">{status}</span>'
-                f'<span style="color:{color};font-weight:700">{sc}</span>'
-                f'<span style="color:#334155;overflow:hidden;white-space:nowrap;'
-                f'text-overflow:ellipsis">{last[:80]}</span></div>'
-            )
-        st.markdown(rows_html, unsafe_allow_html=True)
+# ── Entry point ────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("bloom_india.terminal.verify_server:app",
+                host="0.0.0.0", port=8502, reload=False, log_level="info")

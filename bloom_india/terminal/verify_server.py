@@ -18,6 +18,15 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
+# ── Global Mistral rate limiter (shared across ALL threads) ───────────────────
+_mistral_lock       = threading.Lock()
+_mistral_last_call  = 0.0
+MISTRAL_MIN_GAP     = 1.8   # minimum seconds between ANY Mistral call
+
+# ── Deduplication: prevent same symbol running twice ──────────────────────────
+_running_syms: set  = set()
+_running_lock       = threading.Lock()
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,9 +36,19 @@ os.environ.setdefault(
     str(Path(__file__).parents[2] / "config.yaml"),
 )
 
+# Load API keys from environment — uvicorn doesn't inherit shell exports
+# Add your keys to a .env file at the repo root or set them here
+_env_file = Path(__file__).parents[2] / ".env"
+if _env_file.exists():
+    for line in open(_env_file).read().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
+
 from bloom_india.config import CONFIG
 from bloom_india.data.process.pdf_extract import extract_symbol
-from bloom_india.data.process.pdf_mistral_extractor import extract_pdf_fields
+from bloom_india.data.process.pdf_mistral_extractor import extract_pdf_fields, FIELDS
 
 import pandas as pd
 
@@ -93,17 +112,36 @@ def _latest_xbrl(db, sym):
     rows = db[db["symbol"]==sym]["quarter_label"].dropna().unique().tolist()
     return max(rows, key=_qkey) if rows else ""
 
-def _latest_pdf(sym):
+def _latest_pdf(sym, db=None):
+    """
+    Find best PDF for verification:
+    - If db provided: prefer latest PDF whose quarter exists in XBRL (best for verify)
+    - Fallback: absolute latest PDF (NEW DATA mode)
+    """
     d = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()
     if not d.exists(): return None, None
     pdfs = list(d.glob("*.pdf"))
     if not pdfs: return None, None
-    def key(p):
+
+    def _key(p):
         m = re.search(r"(Q[1-4])_FY(\d{4})", p.stem)
         return _qkey(f"{m.group(1)}_FY{m.group(2)}") if m else 0
-    p = max(pdfs, key=key)
-    m = re.search(r"(Q[1-4])_FY(\d{4})", p.stem)
-    return p.stem, (f"{m.group(1)}_FY{m.group(2)}" if m else "")
+
+    def _ql(p):
+        m = re.search(r"(Q[1-4])_FY(\d{4})", p.stem)
+        return f"{m.group(1)}_FY{m.group(2)}" if m else ""
+
+    # Prefer latest PDF with XBRL coverage
+    if db is not None:
+        xbrl_qs = set(db[db["symbol"]==sym]["quarter_label"].dropna().tolist())
+        covered = [p for p in pdfs if _ql(p) in xbrl_qs]
+        if covered:
+            p = max(covered, key=_key)
+            return p.stem, _ql(p)
+
+    # Fallback: absolute latest
+    p = max(pdfs, key=_key)
+    return p.stem, _ql(p)
 
 def _save_log(sym, lines):
     with open(LOG_DIR/f"{sym}.log","w") as f:
@@ -126,6 +164,11 @@ def _clean_result(r: dict) -> dict:
 
 def _broadcast_log(sym: str, line: str, loop):
     """Thread-safe WebSocket broadcast of a single log line."""
+    log.info(f"[{sym}] {line.strip()}")
+    # Append to in-memory log
+    STATE["logs"].setdefault(sym, []).append(line)
+    # Write to disk immediately so LOGS tab can read it live
+    _save_log(sym, STATE["logs"][sym])
     if loop:
         asyncio.run_coroutine_threadsafe(
             manager.broadcast({"type":"log","symbol":sym,"line":line}),
@@ -134,7 +177,11 @@ def _broadcast_log(sym: str, line: str, loop):
 
 # ── Core verify (runs in thread) ───────────────────────────────────────────────
 def verify_one_sync(sym: str, db: pd.DataFrame,
-                    force: bool = False, loop=None) -> dict:
+                    force_vision:  bool = False,
+                    force_extract: bool = False,
+                    loop=None,
+                    vision_model:  str = "pixtral-12b-2409",
+                    extract_model: str = "mistral-small-latest") -> dict:
     log_lines = []
     ts = datetime.now().strftime("%H:%M:%S")
     result = dict(symbol=sym, xbrl_latest="", pdf_latest="", status="UNKNOWN",
@@ -151,7 +198,7 @@ def verify_one_sync(sym: str, db: pd.DataFrame,
         return result
 
     log_lines.append(f"  [XBRL] Latest: {xbrl_ql}")
-    pdf_stem, pdf_ql = _latest_pdf(sym)
+    pdf_stem, pdf_ql = _latest_pdf(sym, db=db)
     result["pdf_latest"] = pdf_ql or ""
 
     if not pdf_stem:
@@ -173,7 +220,7 @@ def verify_one_sync(sym: str, db: pd.DataFrame,
                 log_lines.append(f"  [DOWNLOAD] ✓ {n_dl} PDFs downloaded")
                 _broadcast_log(sym, log_lines[-1], loop)
                 # Re-check
-                pdf_stem, pdf_ql = _latest_pdf(sym)
+                pdf_stem, pdf_ql = _latest_pdf(sym, db=db)
                 result["pdf_latest"] = pdf_ql or ""
             else:
                 gaps    = dl_result.get("gaps", [])
@@ -192,10 +239,26 @@ def verify_one_sync(sym: str, db: pd.DataFrame,
 
     log_lines.append(f"  [PDF]  Latest: {pdf_stem} ({pdf_ql})")
 
-    # ── Broadcast log lines so far ────────────────────────────────────────────
+    # force_extract: clear mistral cache so all fields re-run
+    if force_extract and pdf_stem:
+        slug    = re.sub(r"[^\w\-]", "_", extract_model)
+        cache_p = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()/f"mistral_cache_{slug}.json"
+        if cache_p.exists():
+            try:
+                mc = json.load(open(cache_p))
+                if pdf_stem in mc:
+                    del mc[pdf_stem]
+                    json.dump(mc, open(cache_p,"w"), indent=2)
+                    msg = f"  [FORCE] Cleared mistral cache for {pdf_stem}"
+                    log_lines.append(msg); _broadcast_log(sym, msg, loop)
+            except Exception as e:
+                log.warning(f"  [FORCE] Cache clear error: {e}")
+
+    is_new = _qkey(pdf_ql) > _qkey(xbrl_ql)
     result["is_new"] = is_new
     log_lines.append(f"  [MODE] {'NEW DATA' if is_new else 'VERIFY'} — "
                      f"PDF={pdf_ql} {'>' if is_new else '=='} XBRL={xbrl_ql}")
+    _broadcast_log(sym, log_lines[-1], loop)
 
     xbrl_row = None
     if not is_new and pdf_ql:
@@ -213,15 +276,80 @@ def verify_one_sync(sym: str, db: pd.DataFrame,
         if raw_path.exists():
             with open(raw_path) as f: all_raw = json.load(f)
 
-        if pdf_stem in all_raw and all_raw[pdf_stem].get("page_results"):
-            log_lines.append(f"  [CACHE] {pdf_stem} already extracted")
-            _broadcast_log(sym, log_lines[-1], loop)
-            page_results = all_raw[pdf_stem].get("page_results", {})
+        if not force_vision and pdf_stem in all_raw and all_raw[pdf_stem].get("page_results"):
+            # Check extractor matches — if switching from pixtral to docling, re-extract
+            cached_extractor = all_raw[pdf_stem].get("extractor", "pixtral")
+            req_extractor    = ("docling" if vision_model=="docling"
+                                else "gemini" if vision_model.startswith("gemini")
+                                else "pixtral")
+            if cached_extractor == req_extractor:
+                log_lines.append(f"  [CACHE] {pdf_stem} already extracted ({cached_extractor})")
+                _broadcast_log(sym, log_lines[-1], loop)
+                page_results = all_raw[pdf_stem].get("page_results", {})
+            else:
+                log_lines.append(f"  [SWITCH] Extractor changed {cached_extractor}→{req_extractor}, re-extracting...")
+                _broadcast_log(sym, log_lines[-1], loop)
+                page_results = None  # fall through to extraction
         else:
-            log_lines.append(f"  [VISION] Running Mistral vision on {pdf_stem}...")
-            _broadcast_log(sym, log_lines[-1], loop)
-            new_raw = extract_symbol(sym, force=False, verbose=False)
-            page_results = new_raw.get(pdf_stem, {}).get("page_results", {})
+            page_results = None  # needs extraction
+
+        if page_results is None:
+            if vision_model == "docling":
+                log_lines.append(f"  [DOCLING] Extracting {pdf_stem} locally...")
+                _broadcast_log(sym, log_lines[-1], loop)
+                try:
+                    from bloom_india.data.process.pdf_docling_extractor import extract_pdf_docling
+                    def _docling_cb(line): _broadcast_log(sym, line, loop)
+                    pdf_path_obj = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()/f"{pdf_stem}.pdf"
+                    raw = extract_pdf_docling(
+                        str(pdf_path_obj), symbol=sym,
+                        force=force_vision, log_cb=_docling_cb,
+                    )
+                    page_results = raw.get("page_results", {})
+                    raw["extractor"] = "docling"
+                except Exception as e:
+                    log_lines.append(f"  [DOCLING] Error: {e} — falling back to Pixtral")
+                    _broadcast_log(sym, log_lines[-1], loop)
+                    page_results = {}
+
+            elif vision_model.startswith("gemini"):
+                log_lines.append(f"  [GEMINI] Extracting {pdf_stem} with {vision_model}...")
+                _broadcast_log(sym, log_lines[-1], loop)
+                try:
+                    from bloom_india.data.process.pdf_gemini_extractor import extract_pdf_gemini
+                    def _gemini_cb(line): _broadcast_log(sym, line, loop)
+                    pdf_path_obj = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()/f"{pdf_stem}.pdf"
+                    raw = extract_pdf_gemini(
+                        str(pdf_path_obj), symbol=sym,
+                        model=vision_model, force=force_vision,
+                        log_cb=_gemini_cb,
+                    )
+                    page_results = raw.get("page_results", {})
+                except Exception as e:
+                    log_lines.append(f"  [GEMINI] Error: {e}")
+                    _broadcast_log(sym, log_lines[-1], loop)
+                    page_results = {}
+            else:
+                log_lines.append(f"  [VISION] Running {vision_model} on {pdf_stem}...")
+                _broadcast_log(sym, log_lines[-1], loop)
+                def _vision_cb(line): _broadcast_log(sym, line, loop)
+                pdf_path_obj = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()/f"{pdf_stem}.pdf"
+                from bloom_india.data.process.pdf_extract import extract_pdf
+                raw = extract_pdf(
+                    str(pdf_path_obj), symbol=sym,
+                    force=force_vision, verbose=False, log_cb=_vision_cb,
+                )
+                raw["extractor"] = "pixtral"
+                page_results = raw.get("page_results", {})
+
+            # Save to raw_extractions.json
+            raw_path2 = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()/"raw_extractions.json"
+            all_raw2  = {}
+            if raw_path2.exists():
+                with open(raw_path2) as f: all_raw2 = json.load(f)
+            all_raw2[pdf_stem] = raw
+            with open(raw_path2, "w") as f: json.dump(all_raw2, f)
+
             log_lines.append(f"  [VISION] Done — {len(page_results)} pages")
             _broadcast_log(sym, log_lines[-1], loop)
 
@@ -244,18 +372,61 @@ def verify_one_sync(sym: str, db: pd.DataFrame,
     log_lines.append(f"  [PDF]  {len(page_results)} pages, {n_tables} with tables")
     _broadcast_log(sym, log_lines[-1], loop)
 
+    # ── Detect reporting units (Lakhs vs Crores) ──────────────────────────────
+    unit_scale = 1.0
+    for page_data in page_results.values():
+        raw_text = str(page_data).lower()
+        if any(x in raw_text for x in ["in lakhs","rs. lakhs","rs lakhs","₹ lakhs","lakh"]):
+            unit_scale = 0.01
+            msg = f"  [UNITS] Lakhs detected — scaling ÷100 to Crores"
+            log_lines.append(msg); _broadcast_log(sym, msg, loop)
+            break
+        elif any(x in raw_text for x in ["in millions","rs. millions","usd million"]):
+            unit_scale = 0.1
+            msg = f"  [UNITS] Millions detected — scaling ×0.1 to Crores"
+            log_lines.append(msg); _broadcast_log(sym, msg, loop)
+            break
+
+    _broadcast_log(sym, f"  [MODEL] vision={vision_model}  extract={extract_model}", loop)
+
+    # If unit_scale != 1.0, clear any existing cache since old values are unscaled
+    if unit_scale != 1.0:
+        slug    = re.sub(r"[^\w\-]", "_", extract_model)
+        cache_p = Path(CONFIG.storage.raw_dir)/"filings"/sym.upper()/f"mistral_cache_{slug}.json"
+        if cache_p.exists():
+            try:
+                mc = json.load(open(cache_p))
+                if pdf_stem in mc:
+                    # Check if cached values look unscaled (too large for unit_scale=0.01)
+                    sample_val = next(
+                        (v.get("value") for v in mc[pdf_stem].values()
+                         if isinstance(v, dict) and v.get("value") and v["value"] > 100),
+                        None
+                    )
+                    if sample_val and sample_val > 1000:
+                        del mc[pdf_stem]
+                        json.dump(mc, open(cache_p,"w"), indent=2)
+                        msg = f"  [UNITS] Cleared unscaled cache for {pdf_stem} (values were in Lakhs)"
+                        log_lines.append(msg); _broadcast_log(sym, msg, loop)
+            except Exception as e:
+                log.warning(f"  [UNITS] Cache check error: {e}")
+
     log.info(f"  Starting field extraction for {sym}/{pdf_stem}")
     try:
-        # log_cb streams each line via WebSocket in real-time
-        def _field_log_cb(line: str):
-            STATE["logs"].setdefault(sym, []).append(line)
-            _broadcast_log(sym, line, loop)
+        _loop = loop
+        _sym  = sym
 
-        log.info(f"  Calling extract_pdf_fields for {sym}/{pdf_stem} force={force}")
+        def _field_log_cb(line: str):
+            _broadcast_log(_sym, line, _loop)
+
+        _field_log_cb(f"  [START] Field extraction — {len(FIELDS)} fields  model={extract_model}  unit_scale={unit_scale}")
+
+        log.info(f"  Calling extract_pdf_fields for {sym}/{pdf_stem} force_extract={force_extract}")
         ext = extract_pdf_fields(
             symbol=sym, pdf_stem=pdf_stem, page_results=page_results,
             quarter_label=pdf_ql or "", xbrl_row=xbrl_row,
-            force=force, verbose=False, log_cb=_field_log_cb,
+            force=force_extract, verbose=False, log_cb=_field_log_cb,
+            model=extract_model, unit_scale=unit_scale,
         )
         log.info(f"  extract_pdf_fields done for {sym}: {len(ext.get('fields',{}))} fields")
     except Exception as e:
@@ -315,7 +486,10 @@ def _get_db() -> pd.DataFrame:
         _db_cache = pd.read_parquet(str(CONFIG.storage.fundamental_db))
     return _db_cache
 
-def _run_thread(syms: list, force: bool, loop: asyncio.AbstractEventLoop):
+def _run_thread(syms: list, force_vision: bool, force_extract: bool,
+                loop: asyncio.AbstractEventLoop,
+                vision_model: str = "pixtral-12b-2409",
+                extract_model: str = "mistral-small-latest"):
     db = _get_db()
     STATE["running"]  = True
     STATE["progress"] = 0
@@ -323,8 +497,16 @@ def _run_thread(syms: list, force: bool, loop: asyncio.AbstractEventLoop):
     STATE["current"]  = ""
 
     for i, sym in enumerate(syms):
-        if not STATE["running"]:  # allow stop
+        if not STATE["running"]:
             break
+
+        # Skip if already running (dedup)
+        with _running_lock:
+            if sym in _running_syms:
+                log.warning(f"  [SKIP] {sym} already running — skipped")
+                continue
+            _running_syms.add(sym)
+
         STATE["current"]  = sym
         STATE["progress"] = i
 
@@ -335,7 +517,12 @@ def _run_thread(syms: list, force: bool, loop: asyncio.AbstractEventLoop):
         )
 
         try:
-            r = verify_one_sync(sym, db, force=force, loop=loop)
+            r = verify_one_sync(sym, db,
+                                force_vision=force_vision,
+                                force_extract=force_extract,
+                                loop=loop,
+                                vision_model=vision_model,
+                                extract_model=extract_model)
         except Exception as e:
             r = dict(symbol=sym, status="ERROR", xbrl_latest="", pdf_latest="",
                      verdict="", score=0, fields={}, labels={}, math=[],
@@ -345,6 +532,9 @@ def _run_thread(syms: list, force: bool, loop: asyncio.AbstractEventLoop):
             _save_log(sym, [f"[ERROR] {e}"])
 
         STATE["results"][sym] = _clean_result(r)
+
+        with _running_lock:
+            _running_syms.discard(sym)
 
         # Broadcast result
         asyncio.run_coroutine_threadsafe(
@@ -401,9 +591,15 @@ async def start_run(body: dict):
     if STATE["running"]:
         return JSONResponse({"error":"already running"}, status_code=409)
 
-    mode  = body.get("mode","single")
-    sym   = body.get("symbol","")
-    force = body.get("force", False)
+    mode          = body.get("mode","single")
+    sym           = body.get("symbol","")
+    force_vision  = body.get("force_vision",  False)
+    force_extract = body.get("force_extract", False)
+    # legacy: if old 'force' key sent, apply to both
+    if body.get("force", False):
+        force_vision = force_extract = True
+    vision_model  = body.get("vision_model",  "pixtral-12b-2409")
+    extract_model = body.get("extract_model", "mistral-small-latest")
 
     filings_root = Path(CONFIG.storage.raw_dir)/"filings"
     db = _get_db()
@@ -417,12 +613,15 @@ async def start_run(body: dict):
     else:
         syms = all_syms
 
-    # Reset results only for the symbols being run
     for s in syms:
         STATE["results"].pop(s, None)
 
     loop = asyncio.get_event_loop()
-    t = threading.Thread(target=_run_thread, args=(syms, force, loop), daemon=True)
+    t = threading.Thread(
+        target=_run_thread,
+        args=(syms, force_vision, force_extract, loop, vision_model, extract_model),
+        daemon=True,
+    )
     t.start()
 
     return JSONResponse({"started":True,"total":len(syms)})
@@ -431,6 +630,70 @@ async def start_run(body: dict):
 async def stop_run():
     STATE["running"] = False
     return JSONResponse({"stopped":True})
+
+@app.get("/api/raw_symbols")
+async def get_raw_symbols():
+    """List all symbols that have any vision cache."""
+    filings_root = Path(CONFIG.storage.raw_dir)/"filings"
+    syms = set()
+    # Symbols with vision cache dirs
+    for p in filings_root.glob("*/.cache_*"):
+        if p.is_dir():
+            syms.add(p.parent.name)
+    # Also symbols with raw_extractions.json
+    for p in filings_root.glob("*/raw_extractions.json"):
+        syms.add(p.parent.name)
+    return JSONResponse(sorted(syms))
+
+@app.get("/api/raw/{symbol}")
+async def get_raw_extraction(symbol: str, model: str = ""):
+    """
+    Return all vision extractions for a symbol, keyed by model name.
+    Also includes mistral extraction caches keyed as 'extract:{model}'.
+    Returns: {model_name: {pdf_stem: {page_num: page_data}}}
+    """
+    filings_dir = Path(CONFIG.storage.raw_dir)/"filings"/symbol.upper()
+    if not filings_dir.exists():
+        return JSONResponse({})
+
+    result = {}
+
+    # ── Vision model caches (.cache_{model}/) ──────────────────────────────
+    for cache_dir in sorted(filings_dir.glob(".cache_*")):
+        model_name = cache_dir.name.replace(".cache_", "").replace("_", "-")
+        if model and model.replace("-","_") not in cache_dir.name:
+            continue
+        for pdf_dir in sorted(cache_dir.iterdir()):
+            if not pdf_dir.is_dir(): continue
+            pdf_stem = pdf_dir.name
+            pages    = {}
+            for pf in sorted(pdf_dir.glob("page_*.json")):
+                try:
+                    pd_data  = json.load(open(pf))
+                    page_num = str(int(pf.stem.replace("page_","")))
+                    pages[page_num] = pd_data
+                except Exception: continue
+            if pages:
+                result.setdefault(model_name, {})[pdf_stem] = pages
+
+    # ── Extraction model caches (mistral_cache_{model}.json) ───────────────
+    for cache_file in sorted(filings_dir.glob("mistral_cache_*.json")):
+        model_slug = cache_file.stem.replace("mistral_cache_","").replace("_","-")
+        key        = f"extract:{model_slug}"
+        if model and model not in key: continue
+        try:
+            data = json.load(open(cache_file))
+            # data = {pdf_stem: {field: {value, label, confidence}}}
+            for pdf_stem, fields in data.items():
+                # Convert to page-like format for display
+                result.setdefault(key, {})[pdf_stem] = {
+                    "fields": fields,
+                    "_type":  "extraction_cache",
+                    "_model": model_slug,
+                }
+        except Exception: continue
+
+    return JSONResponse(result)
 
 @app.get("/api/log/{symbol}")
 async def get_log(symbol: str):

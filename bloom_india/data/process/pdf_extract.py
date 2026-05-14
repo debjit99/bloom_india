@@ -82,8 +82,10 @@ def _filings_dir(symbol: str) -> Path:
     return Path(CONFIG.storage.raw_dir) / "filings" / symbol.upper()
 
 
-def _page_cache_path(symbol: str, pdf_stem: str, page_num: int) -> Path:
-    cache_dir = _filings_dir(symbol) / ".cache" / pdf_stem
+def _page_cache_path(symbol: str, pdf_stem: str, page_num: int,
+                     model: str = "pixtral-12b-2409") -> Path:
+    model_slug = re.sub(r"[^\w\-]", "_", model)
+    cache_dir  = _filings_dir(symbol) / f".cache_{model_slug}" / pdf_stem
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir / f"page_{page_num:03d}.json"
 
@@ -183,6 +185,7 @@ def extract_pdf(
     symbol:   str  = "",
     force:    bool = False,
     verbose:  bool = True,
+    log_cb          = None,   # callback(str) — called for every page event
 ) -> dict:
     """
     Extract raw financial data from every page of one PDF.
@@ -260,6 +263,14 @@ def extract_pdf(
     last_api_call   = 0.0
     n_cached = n_new = 0
 
+    def _log(msg):
+        log.info(msg)
+        if log_cb:
+            try: log_cb(msg)
+            except Exception: pass
+
+    _log(f"  [VISION] {pdf_stem}: {len(images)} pages to process")
+
     for i, img in enumerate(images):
         page_num   = i + 1
         cache_path = _page_cache_path(symbol, pdf_stem, page_num)
@@ -270,11 +281,12 @@ def extract_pdf(
                 page_raw = json.load(f)
             n_cached += 1
             result["page_results"][str(page_num)] = page_raw
+            has   = page_raw.get("has_financial_table", False)
+            stype = page_raw.get("statement_type", "")
+            nrows = len(page_raw.get("data", {}))
+            status = f"[{stype}] {nrows} rows" if has else "no table"
+            _log(f"  [VISION] Page {page_num:2d}/{len(images)} [CACHE] {status}")
             if verbose:
-                has  = page_raw.get("has_financial_table", False)
-                stype = page_raw.get("statement_type", "")
-                nrows = len(page_raw.get("data", {}))
-                status = f"[{stype}] {nrows} rows" if has else "skip"
                 print(f"  Page {page_num:2d}/{result['pages']}  [CACHE]  {status}")
             continue
 
@@ -282,10 +294,12 @@ def extract_pdf(
         elapsed = time.time() - last_api_call
         wait    = (60.0 / RATE_LIMIT) - elapsed
         if wait > 0 and last_api_call > 0:
+            _log(f"  [VISION] Page {page_num:2d}/{len(images)} waiting {wait:.0f}s (rate limit)...")
             if verbose:
                 print(f"  [RATE LIMIT] waiting {wait:.1f}s...")
             time.sleep(wait)
 
+        _log(f"  [VISION] Page {page_num:2d}/{len(images)} calling Mistral vision...")
         if verbose:
             print(f"  Page {page_num:2d}/{result['pages']} ...", end=" ", flush=True)
 
@@ -301,6 +315,7 @@ def extract_pdf(
             err = page_raw.get("_error", "")
             if "429" in err or "rate" in err.lower():
                 wait = 60 + attempt * 30
+                _log(f"  [VISION] Page {page_num} rate limited — waiting {wait}s (attempt {attempt+1})")
                 if verbose:
                     print(f"\n  [RATE LIMIT] waiting {wait}s...")
                 time.sleep(wait)
@@ -321,17 +336,21 @@ def extract_pdf(
         result["page_results"][str(page_num)] = page_raw
         n_new += 1
 
-        if verbose:
-            has   = page_raw.get("has_financial_table", False)
-            err   = page_raw.get("_error", "")
-            stype = page_raw.get("statement_type", "")
-            nrows = len(page_raw.get("data", {}))
-            if has:
-                print(f"[{stype}] {nrows} rows")
-            elif err:
-                print(f"ERROR: {err[:60]}")
-            else:
-                print("skip")
+        has   = page_raw.get("has_financial_table", False)
+        err   = page_raw.get("_error", "")
+        stype = page_raw.get("statement_type", "")
+        nrows = len(page_raw.get("data", {}))
+        if has:
+            _log(f"  [VISION] Page {page_num:2d}/{len(images)} ✓ [{stype}] {nrows} rows")
+            if verbose: print(f"[{stype}] {nrows} rows")
+        elif err:
+            _log(f"  [VISION] Page {page_num:2d}/{len(images)} ERROR: {err[:60]}")
+            if verbose: print(f"ERROR: {err[:60]}")
+        else:
+            _log(f"  [VISION] Page {page_num:2d}/{len(images)} no table")
+            if verbose: print("skip")
+
+    _log(f"  [VISION] Done: {pdf_stem} — {len(images)} pages [{n_cached} cached, {n_new} new]")
 
     if verbose:
         print(f"  ✓ {pdf_stem}: {result['pages']} pages  "
@@ -346,6 +365,7 @@ def extract_symbol(
     symbol:  str,
     force:   bool = False,
     verbose: bool = True,
+    log_cb         = None,   # callback(str) — streamed to caller
 ) -> dict:
     """
     Extract all PDFs for a symbol.
@@ -394,6 +414,7 @@ def extract_symbol(
             symbol  = symbol,
             force   = force,
             verbose = verbose,
+            log_cb  = log_cb,
         )
 
         all_raw[label] = raw

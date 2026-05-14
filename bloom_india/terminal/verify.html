@@ -468,10 +468,29 @@ select:focus, input:focus { border-color: var(--blue); }
     <option value="all">Full universe</option>
   </select>
 
-  <select id="sel-sym" style="width:160px"></select>
+  <select id="sel-sym" style="width:150px"></select>
 
-  <label class="check-wrap">
-    <input type="checkbox" id="chk-force"> Force re-extract
+  <select id="sel-vision-model" title="Vision model (PDF→JSON)">
+    <option value="gemini-2.5-flash">Gemini 2.5 Flash (15 RPM · free)</option>
+    <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash Lite (free)</option>
+    <option value="docling">Docling (local · no API)</option>
+    <option value="pixtral-12b-2409">Pixtral 12b (Mistral · 2 RPM)</option>
+    <option value="pixtral-large-latest">Pixtral Large (Mistral)</option>
+  </select>
+
+  <select id="sel-extract-model" title="Extraction model (JSON→fields)">
+    <option value="mistral-small-latest">Mistral Small</option>
+    <option value="open-mistral-nemo">Mistral Nemo</option>
+    <option value="mistral-large-latest">Mistral Large</option>
+    <option value="open-mixtral-8x7b">Mixtral 8x7b</option>
+  </select>
+
+  <label class="check-wrap" title="Re-run Mistral vision on PDF pages (slow)">
+    <input type="checkbox" id="chk-force-vision"> Re-vision
+  </label>
+
+  <label class="check-wrap" title="Re-run field extraction (clears mistral cache)">
+    <input type="checkbox" id="chk-force-extract"> Re-extract
   </label>
 
   <button class="btn btn-run" id="btn-run" onclick="startRun()">▶ RUN</button>
@@ -566,6 +585,7 @@ select:focus, input:focus { border-color: var(--blue); }
       <div class="tab active" data-tab="overview"  onclick="switchTab('overview')">OVERVIEW</div>
       <div class="tab"        data-tab="scores"    onclick="switchTab('scores')">SCORES</div>
       <div class="tab"        data-tab="inspector" onclick="switchTab('inspector')">INSPECTOR</div>
+      <div class="tab"        data-tab="raw"       onclick="switchTab('raw')">RAW VISION</div>
       <div class="tab"        data-tab="logs"      onclick="switchTab('logs')">LOGS</div>
     </div>
 
@@ -654,6 +674,46 @@ select:focus, input:focus { border-color: var(--blue); }
           <span>Click a symbol in the list to inspect</span>
         </div>
         <div id="inspector-content" style="display:none"></div>
+      </div>
+
+      <!-- RAW VISION -->
+      <div class="tab-pane" id="tab-raw">
+        <div style="display:flex;gap:10px;margin-bottom:10px;align-items:center">
+          <select id="raw-sym-sel" onchange="loadRawVision()" style="width:150px">
+            <option>— select symbol —</option>
+          </select>
+          <select id="raw-model-sel" onchange="loadRawVision()" style="width:200px"
+                  title="Which vision model's output to view">
+            <option value="">— all models —</option>
+            <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+            <option value="gemini-2.0-flash-lite">gemini-2.0-flash-lite</option>
+            <option value="pixtral-12b-2409">pixtral-12b-2409</option>
+            <option value="pixtral-large-latest">pixtral-large-latest</option>
+          </select>
+          <select id="raw-pdf-sel" onchange="renderRawPdf()" style="width:220px"></select>
+          <select id="raw-page-sel" onchange="renderRawPage()" style="width:120px"></select>
+          <span style="color:var(--muted);font-size:10px" id="raw-info"></span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <!-- Raw extracted rows -->
+          <div>
+            <div style="font-size:9px;color:var(--muted);letter-spacing:0.12em;margin-bottom:6px">
+              VISION EXTRACTED ROWS
+            </div>
+            <div id="raw-rows" class="logbox" style="height:calc(100vh - 320px)">
+              <span style="color:var(--muted)">Select a symbol and PDF above.</span>
+            </div>
+          </div>
+          <!-- Page metadata -->
+          <div>
+            <div style="font-size:9px;color:var(--muted);letter-spacing:0.12em;margin-bottom:6px">
+              PAGE METADATA
+            </div>
+            <div id="raw-meta" class="logbox" style="height:calc(100vh - 320px)">
+              <span style="color:var(--muted)">Select a page.</span>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- LOGS -->
@@ -963,6 +1023,7 @@ async function init() {
   refreshLogList();
 
   connectWS();
+  refreshRawSymList();
 
   // Mode change
   document.getElementById('sel-mode').onchange = function() {
@@ -972,18 +1033,24 @@ async function init() {
 }
 
 async function startRun() {
-  const mode  = document.getElementById('sel-mode').value;
-  const sym   = document.getElementById('sel-sym').value;
-  const force = document.getElementById('chk-force').checked;
+  const mode          = document.getElementById('sel-mode').value;
+  const sym           = document.getElementById('sel-sym').value;
+  const force_vision  = document.getElementById('chk-force-vision').checked;
+  const force_extract = document.getElementById('chk-force-extract').checked;
+  const vision_model  = document.getElementById('sel-vision-model').value;
+  const extract_model = document.getElementById('sel-extract-model').value;
 
-  // Clear live log
   document.getElementById('live-log').innerHTML = '';
-  S.liveLines = [];
+  S.liveLines  = [];
   S.tqdmFields = {};
 
   const r = await fetch('/api/run', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({mode, symbol:sym, force})
+    body: JSON.stringify({
+      mode, symbol:sym,
+      force_vision, force_extract,
+      vision_model, extract_model,
+    })
   });
   const data = await r.json();
   if (data.error) { toast('Error: ' + data.error, true); return; }
@@ -1356,6 +1423,7 @@ function switchTab(tab) {
     el.classList.toggle('active', el.dataset.tab===tab));
   document.querySelectorAll('.tab-pane').forEach(el =>
     el.classList.toggle('active', el.id==='tab-'+tab));
+  if (tab==='raw') refreshRawSymList();
 }
 
 // ── Toast ──────────────────────────────────────────────────────────────────
@@ -1365,6 +1433,197 @@ function toast(msg, isErr=false) {
   el.style.borderColor = isErr ? 'var(--red)' : 'var(--border)';
   el.classList.add('show');
   setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+// ── Raw vision viewer ──────────────────────────────────────────────────────
+let _rawData   = {};   // legacy
+let _rawModels = {};   // {model: {pdf_stem: {page_num: page_data}}}
+
+async function refreshRawSymList() {
+  const r    = await fetch('/api/raw_symbols').then(r=>r.json());
+  const sel  = document.getElementById('raw-sym-sel');
+  const prev = sel.value;
+  sel.innerHTML = '<option>— select symbol —</option>';
+  r.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s; opt.textContent = s;
+    if (s===prev) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+async function loadRawVision() {
+  const sym   = document.getElementById('raw-sym-sel').value;
+  const model = document.getElementById('raw-model-sel').value;
+  if (!sym || sym.startsWith('—')) return;
+
+  const url  = model ? `/api/raw/${sym}?model=${encodeURIComponent(model)}`
+                     : `/api/raw/${sym}`;
+  const data = await fetch(url).then(r=>r.json());
+
+  _rawModels = data;
+
+  // Populate PDF selector from all models
+  const pdfSel  = document.getElementById('raw-pdf-sel');
+  const prevPdf = pdfSel.value;
+  pdfSel.innerHTML = '<option>— select PDF —</option>';
+
+  const allPdfs = new Set();
+  Object.values(data).forEach(modelData => {
+    if (typeof modelData === 'object') {
+      Object.keys(modelData).forEach(stem => {
+        // Only add if it looks like a PDF stem (not a field cache)
+        if (!stem.startsWith('{')) allPdfs.add(stem);
+      });
+    }
+  });
+
+  if (allPdfs.size === 0) {
+    document.getElementById('raw-info').textContent = 'No cached extractions found';
+    return;
+  }
+
+  Array.from(allPdfs).sort().forEach(stem => {
+    const opt = document.createElement('option');
+    opt.value = stem; opt.textContent = stem;
+    if (stem === prevPdf) opt.selected = true;
+    pdfSel.appendChild(opt);
+  });
+
+  const modelNames = Object.keys(data);
+  document.getElementById('raw-info').textContent =
+    `${allPdfs.size} PDF(s) | Models: ${modelNames.join(', ')}`;
+
+  // Auto-select first PDF if none selected
+  if (!prevPdf || prevPdf.startsWith('—')) {
+    pdfSel.selectedIndex = 1;
+  }
+  renderRawPdf();
+}
+
+function renderRawPdf() {
+  const stem = document.getElementById('raw-pdf-sel').value;
+  if (!stem || stem.startsWith('—')) return;
+
+  // Collect pages across all models for this PDF
+  const modelPages = {};  // model → {page_num: page_data}
+  Object.entries(_rawModels || {}).forEach(([model, pdfs]) => {
+    if (pdfs[stem]) modelPages[model] = pdfs[stem];
+  });
+
+  // Use first model's pages for page selector
+  const firstModel  = Object.keys(modelPages)[0];
+  const pages       = firstModel ? modelPages[firstModel] : {};
+  const pageSel     = document.getElementById('raw-page-sel');
+  pageSel.innerHTML = '<option>— page —</option>';
+
+  const allPageNums = new Set();
+  Object.values(modelPages).forEach(mp => Object.keys(mp).forEach(n => allPageNums.add(n)));
+
+  Array.from(allPageNums).sort((a,b)=>parseInt(a)-parseInt(b)).forEach(num => {
+    // Find page info from any model
+    let has = false, stype = '', nrows = 0;
+    Object.values(modelPages).forEach(mp => {
+      const p = mp[num];
+      if (p?.has_financial_table) { has=true; stype=p.statement_type||''; nrows=Math.max(nrows,Object.keys(p.data||{}).length); }
+    });
+    const opt = document.createElement('option');
+    opt.value = num;
+    opt.textContent = `Page ${num} ${has ? `✓ [${stype}] ${nrows}r` : '—'}`;
+    pageSel.appendChild(opt);
+  });
+
+  // Auto-select first page with data
+  const firstData = Array.from(allPageNums)
+    .sort((a,b)=>parseInt(a)-parseInt(b))
+    .find(n => Object.values(modelPages).some(mp => mp[n]?.has_financial_table));
+  if (firstData) { pageSel.value = firstData; renderRawPage(); }
+
+  const nPages  = allPageNums.size;
+  const nTables = Array.from(allPageNums).filter(n =>
+    Object.values(modelPages).some(mp => mp[n]?.has_financial_table)).length;
+  const models  = Object.keys(modelPages).join(', ');
+  document.getElementById('raw-info').textContent =
+    `${nPages} pages, ${nTables} with tables | ${models}`;
+}
+
+function renderRawPage() {
+  const stem    = document.getElementById('raw-pdf-sel').value;
+  const pageNum = document.getElementById('raw-page-sel').value;
+  if (!stem || !pageNum || stem.startsWith('—')) return;
+
+  const modelPages = {};
+  Object.entries(_rawModels || {}).forEach(([model, pdfs]) => {
+    if (pdfs[stem]?.[pageNum]) modelPages[model] = pdfs[stem][pageNum];
+  });
+
+  const modelNames = Object.keys(modelPages);
+  const rowsBox    = document.getElementById('raw-rows');
+  const metaBox    = document.getElementById('raw-meta');
+
+  if (!modelNames.length) {
+    rowsBox.innerHTML = '<div style="color:var(--muted)">No data for this page.</div>';
+    metaBox.innerHTML = '';
+    return;
+  }
+
+  // ── Rows: show all models side by side ──────────────────────────────────
+  // Collect all unique labels across models
+  const allLabels = new Set();
+  modelNames.forEach(m => Object.keys(modelPages[m]?.data || {}).forEach(l => allLabels.add(l)));
+
+  let rowsHtml = '';
+  if (allLabels.size === 0) {
+    rowsHtml = '<div style="color:var(--muted)">No financial table on this page.</div>';
+  } else {
+    // Header
+    const colW = `${Math.floor(280/modelNames.length)}px`;
+    rowsHtml += `<div style="display:grid;grid-template-columns:220px ${modelNames.map(()=>colW).join(' ')};gap:4px;padding:3px 0;font-size:9px;color:var(--muted);border-bottom:1px solid var(--border);margin-bottom:4px">`;
+    rowsHtml += '<span>LABEL</span>';
+    modelNames.forEach(m => rowsHtml += `<span style="text-align:right;overflow:hidden;white-space:nowrap;text-overflow:ellipsis" title="${m}">${m}</span>`);
+    rowsHtml += '</div>';
+
+    allLabels.forEach(label => {
+      rowsHtml += `<div style="display:grid;grid-template-columns:220px ${modelNames.map(()=>colW).join(' ')};gap:4px;padding:3px 0;font-size:10px;border-bottom:1px solid rgba(13,32,53,0.4)">`;
+      rowsHtml += `<span style="color:var(--dim);overflow:hidden;white-space:nowrap;text-overflow:ellipsis" title="${label}">${label}</span>`;
+      const allVals = modelNames.map(m => (modelPages[m]?.data||{})[label]);
+      modelNames.forEach((m, i) => {
+        const v = allVals[i];
+        const v0 = v?.[0];
+        // Highlight if values differ between models
+        const same = allVals.every(av => JSON.stringify(av?.[0]) === JSON.stringify(allVals[0]?.[0]));
+        const color = !same ? 'var(--yellow)' : v0 != null ? 'var(--text)' : 'var(--muted)';
+        rowsHtml += `<span style="text-align:right;color:${color};font-family:monospace;font-size:10px">${v0 ?? '—'}</span>`;
+      });
+      rowsHtml += '</div>';
+    });
+  }
+  rowsBox.innerHTML = rowsHtml;
+
+  // ── Meta: show per-model metadata ────────────────────────────────────────
+  let metaHtml = '';
+  modelNames.forEach(m => {
+    const page = modelPages[m];
+    metaHtml += `<div style="color:var(--blue);font-size:10px;font-weight:700;margin:8px 0 4px">${m}</div>`;
+    const fields = {
+      has_financial_table: page.has_financial_table,
+      statement_type:      page.statement_type,
+      columns:             page.columns,
+      n_rows:              Object.keys(page.data||{}).length,
+      _error:              page._error,
+      _model:              page._model,
+    };
+    Object.entries(fields).forEach(([k,v]) => {
+      if (v === undefined) return;
+      const color = k==='_error'&&v ? 'var(--red)' :
+                    k==='has_financial_table' ? (v?'var(--green)':'var(--muted)') : 'var(--text)';
+      metaHtml += `<div style="display:flex;gap:8px;padding:2px 0;font-size:10px">
+        <span style="color:var(--muted);width:140px;font-family:monospace">${k}</span>
+        <span style="color:${color}">${JSON.stringify(v)}</span>
+      </div>`;
+    });
+  });
+  metaBox.innerHTML = metaHtml || '<div style="color:var(--muted)">No metadata.</div>';
 }
 
 // ── Start ──────────────────────────────────────────────────────────────────
