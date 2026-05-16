@@ -1,0 +1,27 @@
+# bloom_india requirements
+# Install with:  pip install -r requirements.txt
+# Then run:      python -m bloom_india.setup
+
+# Core data
+pandas>=2.0
+numpy>=1.24
+pyarrow>=12.0
+
+# Networking
+requests>=2.28
+
+# Config
+pyyaml>=6.0
+
+# Terminal / visualisation
+plotly>=5.15
+streamlit>=1.28
+
+# Dev (optional)
+# pytest>=7.0
+# black
+# ruff
+
+# MF REST API
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
